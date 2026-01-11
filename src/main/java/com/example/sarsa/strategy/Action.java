@@ -16,12 +16,17 @@ public enum Action {
     EXPLORE_PATCH,
     EXPLORE_DELETE,
 
-    // ========================== Field Targeting (5) ==========================
-    FOCUS_NAME,
-    FOCUS_QUANTITY,
-    FOCUS_DESCRIPTION,
-    FOCUS_ALL,
-    FOCUS_UNKNOWN,
+    INSPECT_ITEMS,
+    INSPECT_PRICES,
+
+    // ========================== Field Targeting (7) ==========================
+    FOCUS_NAME,         // ITEMS: name field
+    FOCUS_QUANTITY,     // ITEMS: quantity field
+    FOCUS_DESCRIPTION,  // ITEMS: description field
+    FOCUS_PRICE,        // PRICES: price field
+    FOCUS_ITEM_ID,      // PRICES: itemId field (needs valid item!)
+    FOCUS_ALL,          // Apply to all fields
+    FOCUS_UNKNOWN,      // Add unknown/extra fields
 
     // ========================== Mutation Strategy (8) ==========================
     STRATEGY_VALID,
@@ -51,36 +56,46 @@ public enum Action {
      */
     public State applyTo(StrategyState strategy, State state) {
         switch (this) {
-            // Endpoints
+            // http type
             case EXPLORE_GET -> {
                 state.setIsReadyToExecute(1);
-                state.setCurrentEndpoint(Endpoint.GET.ordinal());
-                strategy.setEndpoint(Endpoint.GET);
+                state.setHttpType(HttpType.GET.ordinal());
+                strategy.setHttpType(HttpType.GET);
             }
             case EXPLORE_GET_ALL -> {
                 state.setIsReadyToExecute(1);
-                state.setCurrentEndpoint(Endpoint.GET_ALL.ordinal());
-                strategy.setEndpoint(Endpoint.GET_ALL);
+                state.setHttpType(HttpType.GET_ALL.ordinal());
+                strategy.setHttpType(HttpType.GET_ALL);
             }
             case EXPLORE_POST -> {
                 state.setIsReadyToExecute(1);
-                state.setCurrentEndpoint(Endpoint.POST.ordinal());
-                strategy.setEndpoint(Endpoint.POST);
+                state.setHttpType(HttpType.POST.ordinal());
+                strategy.setHttpType(HttpType.POST);
             }
             case EXPLORE_PUT -> {
                 state.setIsReadyToExecute(1);
-                state.setCurrentEndpoint(Endpoint.PUT.ordinal());
-                strategy.setEndpoint(Endpoint.PUT);
+                state.setHttpType(HttpType.PUT.ordinal());
+                strategy.setHttpType(HttpType.PUT);
             }
             case EXPLORE_PATCH -> {
                 state.setIsReadyToExecute(1);
-                state.setCurrentEndpoint(Endpoint.PATCH.ordinal());
-                strategy.setEndpoint(Endpoint.PATCH);
+                state.setHttpType(HttpType.PATCH.ordinal());
+                strategy.setHttpType(HttpType.PATCH);
             }
             case EXPLORE_DELETE -> {
                 state.setIsReadyToExecute(1);
-                state.setCurrentEndpoint(Endpoint.DELETE.ordinal());
-                strategy.setEndpoint(Endpoint.DELETE);
+                state.setHttpType(HttpType.DELETE.ordinal());
+                strategy.setHttpType(HttpType.DELETE);
+            }
+
+            // Endpoints
+            case INSPECT_ITEMS -> {
+                state.setEndpoint(Endpoint.ITEMS.ordinal());
+                strategy.setEndpoint(Endpoint.ITEMS);
+            }
+            case INSPECT_PRICES -> {
+                state.setEndpoint(Endpoint.PRICES.ordinal());
+                strategy.setEndpoint(Endpoint.PRICES);
             }
 
             // Fields
@@ -95,6 +110,14 @@ public enum Action {
             case FOCUS_DESCRIPTION -> {
                 state.setCurrentField(Field.DESCRIPTION.ordinal());
                 strategy.setField(Field.DESCRIPTION);
+            }
+            case FOCUS_PRICE -> {
+                state.setCurrentField(Field.PRICE.ordinal());
+                strategy.setField(Field.PRICE);
+            }
+            case FOCUS_ITEM_ID -> {
+                state.setCurrentField(Field.ITEM_ID.ordinal());
+                strategy.setField(Field.ITEM_ID);
             }
             case FOCUS_ALL -> {
                 state.setCurrentField(Field.ALL.ordinal());
@@ -149,6 +172,8 @@ public enum Action {
                 strategy.setIntensity(Intensity.MILD);
             }
 
+            // Execute - doesn't modify state
+            case EXECUTE -> { /* handled in SarsaRestTester */ }
         }
         return state;
     }

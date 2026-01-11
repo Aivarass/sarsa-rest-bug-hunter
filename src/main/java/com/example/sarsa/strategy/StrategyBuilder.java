@@ -44,7 +44,11 @@ public class StrategyBuilder {
     /**
      * Get current endpoint.
      */
-    public Endpoint getEndpoint() {
+    public HttpType getHttpType() {
+        return strategy.getHttpType();
+    }
+
+    public Endpoint getEndpoint(){
         return strategy.getEndpoint();
     }
 

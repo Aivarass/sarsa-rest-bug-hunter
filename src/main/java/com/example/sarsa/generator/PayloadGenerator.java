@@ -1,5 +1,6 @@
 package com.example.sarsa.generator;
 
+import com.example.sarsa.strategy.Endpoint;
 import com.example.sarsa.strategy.Field;
 import com.example.sarsa.strategy.Intensity;
 import com.example.sarsa.strategy.Strategy;
@@ -212,12 +213,32 @@ public class PayloadGenerator {
 
     // ========================== Strategy-Aware Generation ==========================
 
+    // Track last item ID for price generation (set by SarsaRestTester)
+    private Long lastItemId = null;
+
+    public void setLastItemId(Long itemId) {
+        this.lastItemId = itemId;
+    }
+
     /**
-     * Generate payload based on field target, strategy, and intensity.
+     * Generate payload based on endpoint, field target, strategy, and intensity.
      * This is the main entry point for strategy-aware SARSA.
      */
+    public String generate(Endpoint endpoint, Field field, Strategy strategy, Intensity intensity) {
+        return switch (endpoint) {
+            case ITEMS -> generateItemsPayload(field, strategy, intensity);
+            case PRICES -> generatePricesPayload(field, strategy, intensity);
+        };
+    }
+
+    /**
+     * Legacy method for backwards compatibility.
+     */
     public String generate(Field field, Strategy strategy, Intensity intensity) {
-        // Get base values adjusted by intensity
+        return generateItemsPayload(field, strategy, intensity);
+    }
+
+    private String generateItemsPayload(Field field, Strategy strategy, Intensity intensity) {
         int stringLen = getStringLength(intensity);
         int numMagnitude = getNumMagnitude(intensity);
         
@@ -231,6 +252,22 @@ public class PayloadGenerator {
             case TYPE_CONFUSE -> generateTypeConfuse(field);
             case ENCODING -> generateEncoding(field, stringLen);
             case NONE -> valid();
+        };
+    }
+
+    private String generatePricesPayload(Field field, Strategy strategy, Intensity intensity) {
+        int numMagnitude = getNumMagnitude(intensity);
+        
+        return switch (strategy) {
+            case VALID -> generatePriceValid(field);
+            case NULL_INJECT -> generatePriceNullInject(field);
+            case NEGATIVE -> generatePriceNegative(field, numMagnitude);
+            case BOUNDARY -> generatePriceBoundary(field, intensity);
+            case STRUCTURE -> generatePriceStructure(field);
+            case INJECTION -> generatePriceInjection(field);
+            case TYPE_CONFUSE -> generatePriceTypeConfuse(field);
+            case ENCODING -> generatePriceValid(field); // Encoding doesn't apply well to prices
+            case NONE -> generatePriceValid(field);
         };
     }
 
@@ -357,6 +394,124 @@ public class PayloadGenerator {
             case NAME -> "{\"name\": \"" + unicode + "\", \"quantity\": " + qty + "}";
             case DESCRIPTION -> "{\"name\": \"test\", \"description\": \"" + unicode + "\", \"quantity\": " + qty + "}";
             default -> "{\"name\": \"" + unicode + "\", \"description\": \"" + unicode + "\", \"quantity\": " + qty + "}";
+        };
+    }
+
+    // ========================== PRICES Endpoint Generators ==========================
+
+    private String getItemIdJson() {
+        // Use real item ID if available, otherwise use a fake one
+        long itemId = lastItemId != null ? lastItemId : (rng.nextLong(1000) + 1);
+        return String.format("{\"id\": %d}", itemId);
+    }
+
+    private String generatePriceValid(Field field) {
+        double price = 10.0 + rng.nextDouble() * 990.0; // 10-1000
+        String itemJson = getItemIdJson();
+        return String.format("{\"item\": %s, \"price\": %.2f}", itemJson, price);
+    }
+
+    private String generatePriceNullInject(Field field) {
+        double price = 10.0 + rng.nextDouble() * 100.0;
+        String itemJson = getItemIdJson();
+        
+        return switch (field) {
+            case PRICE -> "{\"item\": " + itemJson + ", \"price\": null}";
+            case ITEM_ID -> "{\"item\": null, \"price\": " + price + "}";
+            case ALL -> "{\"item\": null, \"price\": null}";
+            default -> {
+                int variant = rng.nextInt(2);
+                yield variant == 0 
+                    ? "{\"item\": null, \"price\": " + price + "}"
+                    : "{\"item\": " + itemJson + ", \"price\": null}";
+            }
+        };
+    }
+
+    private String generatePriceNegative(Field field, int magnitude) {
+        String itemJson = getItemIdJson();
+        double negPrice = -(rng.nextDouble() * magnitude + 1);
+        
+        return switch (field) {
+            case PRICE -> String.format("{\"item\": %s, \"price\": %.2f}", itemJson, negPrice);
+            case ITEM_ID -> "{\"item\": {\"id\": -1}, \"price\": 50.0}"; // Invalid item ID
+            case ALL -> String.format("{\"item\": {\"id\": -1}, \"price\": %.2f}", negPrice);
+            default -> String.format("{\"item\": %s, \"price\": %.2f}", itemJson, negPrice);
+        };
+    }
+
+    private String generatePriceBoundary(Field field, Intensity intensity) {
+        String itemJson = getItemIdJson();
+        
+        return switch (field) {
+            case PRICE -> switch (intensity) {
+                case MILD -> "{\"item\": " + itemJson + ", \"price\": 0}";
+                case MODERATE -> "{\"item\": " + itemJson + ", \"price\": " + Double.MAX_VALUE / 2 + "}";
+                case AGGRESSIVE -> "{\"item\": " + itemJson + ", \"price\": " + Double.MAX_VALUE + "}";
+            };
+            case ITEM_ID -> switch (intensity) {
+                case MILD -> "{\"item\": {\"id\": 0}, \"price\": 50.0}";
+                case MODERATE -> "{\"item\": {\"id\": " + Integer.MAX_VALUE + "}, \"price\": 50.0}";
+                case AGGRESSIVE -> "{\"item\": {\"id\": " + Long.MAX_VALUE + "}, \"price\": 50.0}";
+            };
+            default -> "{\"item\": {\"id\": 0}, \"price\": 0}";
+        };
+    }
+
+    private String generatePriceStructure(Field field) {
+        String itemJson = getItemIdJson();
+        double price = 50.0 + rng.nextDouble() * 50.0;
+        
+        return switch (field) {
+            case PRICE -> "{\"item\": " + itemJson + "}"; // Missing price
+            case ITEM_ID -> "{\"price\": " + price + "}"; // Missing item
+            case UNKNOWN -> "{\"item\": " + itemJson + ", \"price\": " + price + ", \"currency\": \"USD\", \"tax\": 0.1}";
+            case ALL -> "{}"; // Empty object
+            default -> {
+                int variant = rng.nextInt(3);
+                yield switch (variant) {
+                    case 0 -> "{}";
+                    case 1 -> "{\"price\": " + price + "}"; // Missing item
+                    case 2 -> "{\"item\": " + itemJson + "}"; // Missing price
+                    default -> generatePriceValid(field);
+                };
+            }
+        };
+    }
+
+    private String generatePriceInjection(Field field) {
+        String itemJson = getItemIdJson();
+        String[] injections = {
+            "'; DROP TABLE prices; --",
+            "1' OR '1'='1",
+            "<script>alert('xss')</script>",
+            "../../../etc/passwd"
+        };
+        String inject = injections[rng.nextInt(injections.length)];
+        
+        return switch (field) {
+            case PRICE -> "{\"item\": " + itemJson + ", \"price\": \"" + inject + "\"}";
+            case ITEM_ID -> "{\"item\": {\"id\": \"" + inject + "\"}, \"price\": 50.0}";
+            default -> "{\"item\": {\"id\": \"" + inject + "\"}, \"price\": \"" + inject + "\"}";
+        };
+    }
+
+    private String generatePriceTypeConfuse(Field field) {
+        String itemJson = getItemIdJson();
+        
+        return switch (field) {
+            case PRICE -> "{\"item\": " + itemJson + ", \"price\": \"not a number\"}";
+            case ITEM_ID -> "{\"item\": \"not an object\", \"price\": 50.0}";
+            case ALL -> "{\"item\": [1, 2, 3], \"price\": {\"value\": 50}}";
+            default -> {
+                int variant = rng.nextInt(3);
+                yield switch (variant) {
+                    case 0 -> "{\"item\": " + itemJson + ", \"price\": \"fifty dollars\"}";
+                    case 1 -> "{\"item\": 12345, \"price\": 50.0}";
+                    case 2 -> "{\"item\": " + itemJson + ", \"price\": [50, 60, 70]}";
+                    default -> generatePriceValid(field);
+                };
+            }
         };
     }
 }
