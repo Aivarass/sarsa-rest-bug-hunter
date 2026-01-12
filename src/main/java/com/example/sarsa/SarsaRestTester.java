@@ -24,7 +24,7 @@ public class SarsaRestTester {
 
     //ANN
     private int ANN_INPUTS = State.FEATURE_COUNT;
-    private int ANN_ACTIONS = StrategyBuilder.getActionCount();  // 22 actions
+    private int ANN_ACTIONS = StrategyBuilder.getActionCount();  // 29 actions
     private int ANN_NEURONS = 8;
 
 
@@ -36,6 +36,7 @@ public class SarsaRestTester {
     PayloadGenerator pbt;
     private String lastItemId;
     private String lastPriceId;
+    private String lastDiscountId;
     
     // Tracking - raw actions
     private static LinkedHashMap<Integer, Integer> allActionCounts = new LinkedHashMap<>();
@@ -156,6 +157,7 @@ public class SarsaRestTester {
         StrategyBuilder strategy = new StrategyBuilder();
         lastItemId = null;
         lastPriceId = null;
+        lastDiscountId = null;
         State currentState = initState();
         boolean[] mask = getValidMask(currentState, strategy);
         int currentAction = ann.epsilonGreedyMasked(currentState.scale(), EPSILON, mask, rng);
@@ -175,8 +177,9 @@ public class SarsaRestTester {
                 trackStrategyExecution(strategy);
                 executedCombo = String.format("%s+%s+%s+%s", 
                         strategy.getHttpType(), strategy.getEndpoint(), strategy.getStrategy(), strategy.getField());
-                // Pass lastId to PayloadGenerator for PRICES endpoint
+                // Pass IDs to PayloadGenerator for PRICES/DISCOUNTS endpoints
                 pbt.setLastItemId(lastItemId != null ? Long.parseLong(lastItemId) : null);
+                pbt.setLastPriceId(lastPriceId != null ? Long.parseLong(lastPriceId) : null);
                 response = executeWithStrategy(strategy);
                 executeCount++;
             }else{
@@ -241,8 +244,15 @@ public class SarsaRestTester {
         // Generate endpoint-aware payload
         String payload = pbt.generate(endpoint, s.getField(), s.getStrategy(), s.getIntensity());
 
-        String lastId = endpoint == Endpoint.ITEMS ? lastItemId : lastPriceId;
-        
+        String lastId;
+        if(endpoint == Endpoint.ITEMS){
+            lastId = lastItemId;
+        } else if (endpoint == Endpoint.PRICES) {
+            lastId = lastPriceId;
+        }else{
+            lastId = lastDiscountId;
+        }
+
         // Use lowercase endpoint name for URL (items, prices)
         String endpointPath = endpoint.name().toLowerCase();
 
@@ -278,6 +288,13 @@ public class SarsaRestTester {
 //            state.setHasAnyItems(1);
         }
 
+        if (httpType == HttpType.POST && response.statusCode() == 201 && strategy.getEndpoint() == Endpoint.DISCOUNTS) {
+            state.setHasValidDiscountId(1);
+            // removing for now
+//            state.setHasAnyItems(1);
+        }
+
+
         // DELETE success
         if (httpType == HttpType.DELETE && (response.statusCode() == 200 || response.statusCode() == 204)  && strategy.getEndpoint() == Endpoint.ITEMS) {
             state.setHasValidItemId(0);
@@ -287,6 +304,11 @@ public class SarsaRestTester {
         if (httpType == HttpType.DELETE && (response.statusCode() == 200 || response.statusCode() == 204)  && strategy.getEndpoint() == Endpoint.PRICES) {
             state.setHasValidPriceId(0);
             lastPriceId = null;
+        }
+
+        if (httpType == HttpType.DELETE && (response.statusCode() == 200 || response.statusCode() == 204)  && strategy.getEndpoint() == Endpoint.DISCOUNTS) {
+            state.setHasValidDiscountId(0);
+            lastDiscountId = null;
         }
 
         // GET_ALL - check if items exist
@@ -310,6 +332,13 @@ public class SarsaRestTester {
             }
         }
 
+        if (httpType == HttpType.GET_ALL && response.statusCode() == 200 && strategy.getEndpoint() == Endpoint.DISCOUNTS) {
+            extractIdFromGetAll(response, Endpoint.DISCOUNTS);
+            if (lastDiscountId != null) {
+                state.setHasValidDiscountId(1);
+            }
+        }
+
         return state;
     }
 
@@ -328,12 +357,19 @@ public class SarsaRestTester {
         boolean[] mask = new boolean[ANN_ACTIONS];
         boolean hasItemId = state.getHasValidItemId() == 1;
         boolean hasPriceId = state.getHasValidPriceId() == 1;
+        boolean hasDiscountId = state.getHasValidDiscountId() == 1;
         Endpoint currentEndpoint = strategy.getEndpoint();
 
         for (int i = 0; i < ANN_ACTIONS; i++) {
             if (StrategyBuilder.actionRequiresId(i)) {
                 // ID-dependent actions need the correct ID for the current endpoint
-                mask[i] = (currentEndpoint == Endpoint.ITEMS) ? hasItemId : hasPriceId;
+                if (currentEndpoint == Endpoint.ITEMS) {
+                    mask[i] = hasItemId;
+                } else if (currentEndpoint == Endpoint.PRICES) {
+                    mask[i] = hasPriceId;
+                } else {
+                    mask[i] = hasDiscountId;
+                }
             }
             else if (i == StrategyBuilder.getExecuteIndex()) {
                 mask[i] = strategy.isReady();
@@ -356,15 +392,27 @@ public class SarsaRestTester {
             String id = response.jsonPath().getString("id");
             if(endpoint == Endpoint.ITEMS) {
                 lastItemId = id;
-            }else{
+            }else if (endpoint == Endpoint.PRICES){
                 lastPriceId = id;
+            }else{
+                lastDiscountId = id;
             }
         }
         return response;
     }
 
+    public String getEndpointTarget(Endpoint endpoint){
+        if(endpoint == Endpoint.ITEMS){
+            return lastItemId;
+        } else if (endpoint == Endpoint.PRICES) {
+            return lastPriceId;
+        }else{
+            return lastDiscountId;
+        }
+    }
+
     private Response putItem(String payload, Endpoint endpoint) {
-        String targetId = (endpoint == Endpoint.ITEMS) ? lastItemId : lastPriceId;
+        String targetId = getEndpointTarget(endpoint);
 
         return RestAssured.given()
                 .contentType("application/json")
@@ -373,7 +421,7 @@ public class SarsaRestTester {
     }
 
     private Response patchItem(String payload, Endpoint endpoint) {
-        String targetId = (endpoint == Endpoint.ITEMS) ? lastItemId : lastPriceId;
+        String targetId = getEndpointTarget(endpoint);
 
         return RestAssured.given()
                 .contentType("application/json")
@@ -389,8 +437,10 @@ public class SarsaRestTester {
             if (firstId != null) {
                 if (endpoint == Endpoint.ITEMS) {
                     lastItemId = firstId;
-                } else {
+                } else if (endpoint == Endpoint.PRICES) {
                     lastPriceId = firstId;
+                } else {
+                    lastDiscountId = firstId;
                 }
             }
         } catch (Exception ignored) {
@@ -399,7 +449,7 @@ public class SarsaRestTester {
     }
 
     private State initState(){
-        return new State(0,0, 0, 0,0, 0, 0, 0, 0, 0, 0, 0);
+        return new State(0, 0,0, 0, 0,0, 0, 0, 0, 0, 0, 0, 0);
     }
 
 

@@ -8,7 +8,7 @@ import com.example.sarsa.model.State;
  */
 public enum Action {
     
-    // ========================== Endpoint Selection (5) ==========================
+    // ========================== HTTP Type (6) ==========================
     EXPLORE_GET,
     EXPLORE_GET_ALL,
     EXPLORE_POST,
@@ -16,15 +16,19 @@ public enum Action {
     EXPLORE_PATCH,
     EXPLORE_DELETE,
 
+    // ========================== Endpoint (3) ==========================
     INSPECT_ITEMS,
     INSPECT_PRICES,
+    INSPECT_DISCOUNTS,
 
-    // ========================== Field Targeting (7) ==========================
+    // ========================== Field Targeting (9) ==========================
     FOCUS_NAME,         // ITEMS: name field
     FOCUS_QUANTITY,     // ITEMS: quantity field
     FOCUS_DESCRIPTION,  // ITEMS: description field
     FOCUS_PRICE,        // PRICES: price field
     FOCUS_ITEM_ID,      // PRICES: itemId field (needs valid item!)
+    FOCUS_DISCOUNT_ID,
+    FOCUS_DISCOUNT,
     FOCUS_ALL,          // Apply to all fields
     FOCUS_UNKNOWN,      // Add unknown/extra fields
 
@@ -97,6 +101,10 @@ public enum Action {
                 state.setEndpoint(Endpoint.PRICES.ordinal());
                 strategy.setEndpoint(Endpoint.PRICES);
             }
+            case INSPECT_DISCOUNTS -> {
+                state.setEndpoint(Endpoint.DISCOUNTS.ordinal());
+                strategy.setEndpoint(Endpoint.DISCOUNTS);
+            }
 
             // Fields
             case FOCUS_NAME -> {
@@ -118,6 +126,14 @@ public enum Action {
             case FOCUS_ITEM_ID -> {
                 state.setCurrentField(Field.ITEM_ID.ordinal());
                 strategy.setField(Field.ITEM_ID);
+            }
+            case FOCUS_DISCOUNT_ID -> {
+                state.setCurrentField(Field.DISCOUNT_ID.ordinal());
+                strategy.setField(Field.DISCOUNT_ID);
+            }
+            case FOCUS_DISCOUNT -> {
+                state.setCurrentField(Field.DISCOUNT.ordinal());
+                strategy.setField(Field.DISCOUNT);
             }
             case FOCUS_ALL -> {
                 state.setCurrentField(Field.ALL.ordinal());

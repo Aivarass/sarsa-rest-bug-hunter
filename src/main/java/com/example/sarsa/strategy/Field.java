@@ -13,6 +13,8 @@ public enum Field {
     DESCRIPTION,    // Target "description" field (ITEMS)
     PRICE,          // Target "price" field (PRICES)
     ITEM_ID,        // Target "itemId" field (PRICES) - needs valid item!
+    DISCOUNT_ID,
+    DISCOUNT,
     ALL,            // Apply to all fields
     UNKNOWN         // Add unknown/extra fields
 }

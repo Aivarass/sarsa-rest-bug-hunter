@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
 @RequestMapping("/api/prices")
 public class PriceController {
 
-    private final Map<Long, Price> prices = new ConcurrentHashMap<>();
+    public static final Map<Long, Price> prices = new ConcurrentHashMap<>();
     private final AtomicLong idCounter = new AtomicLong(1);
 
     // GET all prices
