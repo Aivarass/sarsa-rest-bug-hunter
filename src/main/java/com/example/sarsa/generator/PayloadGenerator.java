@@ -1,5 +1,6 @@
 package com.example.sarsa.generator;
 
+import com.example.sarsa.strategy.Endpoint;
 import com.example.sarsa.strategy.Field;
 import com.example.sarsa.strategy.Intensity;
 import com.example.sarsa.strategy.Strategy;
@@ -212,12 +213,172 @@ public class PayloadGenerator {
 
     // ========================== Strategy-Aware Generation ==========================
 
+    // Track IDs for nested resource generation (set by SarsaRestTester)
+    private Long lastItemId = null;
+    private Long lastPriceId = null;
+    private Long lastDiscountId = null;
+
+    public void setLastItemId(Long itemId) {
+        this.lastItemId = itemId;
+    }
+
+    public void setLastPriceId(Long priceId) {
+        this.lastPriceId = priceId;
+    }
+
+    public void setLastDiscountId(Long discountId) {
+        this.lastDiscountId = discountId;
+    }
+
     /**
-     * Generate payload based on field target, strategy, and intensity.
+     * Generate payload based on endpoint, field target, strategy, and intensity.
      * This is the main entry point for strategy-aware SARSA.
      */
+    public String generate(Endpoint endpoint, Field field, Strategy strategy, Intensity intensity) {
+        return switch (endpoint) {
+            case ITEMS -> generateItemsPayload(field, strategy, intensity);
+            case PRICES -> generatePricesPayload(field, strategy, intensity);
+            case DISCOUNTS -> generateDiscountsPayload(field, strategy, intensity);
+            case POINTS -> generatePointsPayload(field, strategy, intensity);
+        };
+    }
+
+    private String generatePointsPayload(Field field, Strategy strategy, Intensity intensity) {
+        int numMagnitude = getNumMagnitude(intensity);
+        
+        return switch (strategy) {
+            case VALID -> generatePointsValid(field);
+            case NULL_INJECT -> generatePointsNullInject(field);
+            case NEGATIVE -> generatePointsNegative(field, numMagnitude);
+            case BOUNDARY -> generatePointsBoundary(field, intensity);
+            case STRUCTURE -> generatePointsStructure(field);
+            case INJECTION -> generatePointsInjection(field);
+            case TYPE_CONFUSE -> generatePointsTypeConfuse(field);
+            case ENCODING -> generatePointsValid(field);
+            case NONE -> generatePointsValid(field);
+        };
+    }
+
+    private String getDiscountIdJson() {
+        long discountId = lastDiscountId != null ? lastDiscountId : (rng.nextLong(1000) + 1);
+        return String.format("{\"id\": %d}", discountId);
+    }
+
+    private String generatePointsValid(Field field) {
+        int points = rng.nextInt(1000) + 1; // 1-1000 points
+        String discountJson = getDiscountIdJson();
+        return String.format("{\"discount\": %s, \"points\": %d}", discountJson, points);
+    }
+
+    private String generatePointsNullInject(Field field) {
+        int points = 100 + rng.nextInt(200);
+        String discountJson = getDiscountIdJson();
+        
+        return switch (field) {
+            case DISCOUNT, DISCOUNT_ID -> "{\"discount\": null, \"points\": " + points + "}";
+            case POINTS -> "{\"discount\": " + discountJson + ", \"points\": null}";
+            case ALL -> "{\"discount\": null, \"points\": null}";
+            default -> {
+                int variant = rng.nextInt(2);
+                yield variant == 0 
+                    ? "{\"discount\": null, \"points\": " + points + "}"
+                    : "{\"discount\": " + discountJson + ", \"points\": null}";
+            }
+        };
+    }
+
+    private String generatePointsNegative(Field field, int magnitude) {
+        String discountJson = getDiscountIdJson();
+        int negPoints = -(rng.nextInt(magnitude) + 1);
+        
+        return switch (field) {
+            case DISCOUNT, DISCOUNT_ID -> "{\"discount\": {\"id\": -1}, \"points\": 100}";
+            case ALL -> String.format("{\"discount\": {\"id\": -1}, \"points\": %d}", negPoints);
+            default -> String.format("{\"discount\": %s, \"points\": %d}", discountJson, negPoints);
+        };
+    }
+
+    private String generatePointsBoundary(Field field, Intensity intensity) {
+        String discountJson = getDiscountIdJson();
+        
+        return switch (field) {
+            case DISCOUNT, DISCOUNT_ID -> switch (intensity) {
+                case MILD -> "{\"discount\": {\"id\": 0}, \"points\": 100}";
+                case MODERATE -> "{\"discount\": {\"id\": " + Integer.MAX_VALUE + "}, \"points\": 100}";
+                case AGGRESSIVE -> "{\"discount\": {\"id\": " + Long.MAX_VALUE + "}, \"points\": 100}";
+            };
+            default -> switch (intensity) {
+                case MILD -> "{\"discount\": " + discountJson + ", \"points\": 0}";
+                case MODERATE -> "{\"discount\": " + discountJson + ", \"points\": " + Integer.MAX_VALUE + "}";
+                case AGGRESSIVE -> "{\"discount\": " + discountJson + ", \"points\": " + Long.MAX_VALUE + "}";
+            };
+        };
+    }
+
+    private String generatePointsStructure(Field field) {
+        String discountJson = getDiscountIdJson();
+        int points = 100 + rng.nextInt(200);
+        
+        return switch (field) {
+            case DISCOUNT, DISCOUNT_ID -> "{\"points\": " + points + "}"; // Missing discount
+            case POINTS -> "{\"discount\": " + discountJson + "}"; // Missing points
+            case UNKNOWN -> "{\"discount\": " + discountJson + ", \"points\": " + points + ", \"bonus\": true, \"tier\": \"gold\"}";
+            case ALL -> "{}";
+            default -> {
+                int variant = rng.nextInt(3);
+                yield switch (variant) {
+                    case 0 -> "{}";
+                    case 1 -> "{\"points\": " + points + "}";
+                    case 2 -> "{\"discount\": " + discountJson + "}";
+                    default -> generatePointsValid(field);
+                };
+            }
+        };
+    }
+
+    private String generatePointsInjection(Field field) {
+        String discountJson = getDiscountIdJson();
+        String[] injections = {
+            "'; DROP TABLE points; --",
+            "1' OR '1'='1",
+            "<script>alert('xss')</script>",
+            "../../../etc/passwd"
+        };
+        String inject = injections[rng.nextInt(injections.length)];
+        
+        return switch (field) {
+            case DISCOUNT, DISCOUNT_ID -> "{\"discount\": {\"id\": \"" + inject + "\"}, \"points\": 100}";
+            default -> "{\"discount\": {\"id\": \"" + inject + "\"}, \"points\": \"" + inject + "\"}";
+        };
+    }
+
+    private String generatePointsTypeConfuse(Field field) {
+        String discountJson = getDiscountIdJson();
+        
+        return switch (field) {
+            case DISCOUNT, DISCOUNT_ID -> "{\"discount\": \"not an object\", \"points\": 100}";
+            case POINTS -> "{\"discount\": " + discountJson + ", \"points\": \"one hundred\"}";
+            case ALL -> "{\"discount\": [1, 2, 3], \"points\": {\"value\": 100}}";
+            default -> {
+                int variant = rng.nextInt(3);
+                yield switch (variant) {
+                    case 0 -> "{\"discount\": " + discountJson + ", \"points\": \"hundred\"}";
+                    case 1 -> "{\"discount\": 12345, \"points\": 100}";
+                    case 2 -> "{\"discount\": " + discountJson + ", \"points\": [100, 200, 300]}";
+                    default -> generatePointsValid(field);
+                };
+            }
+        };
+    }
+
+    /**
+     * Legacy method for backwards compatibility.
+     */
     public String generate(Field field, Strategy strategy, Intensity intensity) {
-        // Get base values adjusted by intensity
+        return generateItemsPayload(field, strategy, intensity);
+    }
+
+    private String generateItemsPayload(Field field, Strategy strategy, Intensity intensity) {
         int stringLen = getStringLength(intensity);
         int numMagnitude = getNumMagnitude(intensity);
         
@@ -231,6 +392,22 @@ public class PayloadGenerator {
             case TYPE_CONFUSE -> generateTypeConfuse(field);
             case ENCODING -> generateEncoding(field, stringLen);
             case NONE -> valid();
+        };
+    }
+
+    private String generatePricesPayload(Field field, Strategy strategy, Intensity intensity) {
+        int numMagnitude = getNumMagnitude(intensity);
+        
+        return switch (strategy) {
+            case VALID -> generatePriceValid(field);
+            case NULL_INJECT -> generatePriceNullInject(field);
+            case NEGATIVE -> generatePriceNegative(field, numMagnitude);
+            case BOUNDARY -> generatePriceBoundary(field, intensity);
+            case STRUCTURE -> generatePriceStructure(field);
+            case INJECTION -> generatePriceInjection(field);
+            case TYPE_CONFUSE -> generatePriceTypeConfuse(field);
+            case ENCODING -> generatePriceValid(field); // Encoding doesn't apply well to prices
+            case NONE -> generatePriceValid(field);
         };
     }
 
@@ -357,6 +534,252 @@ public class PayloadGenerator {
             case NAME -> "{\"name\": \"" + unicode + "\", \"quantity\": " + qty + "}";
             case DESCRIPTION -> "{\"name\": \"test\", \"description\": \"" + unicode + "\", \"quantity\": " + qty + "}";
             default -> "{\"name\": \"" + unicode + "\", \"description\": \"" + unicode + "\", \"quantity\": " + qty + "}";
+        };
+    }
+
+    // ========================== PRICES Endpoint Generators ==========================
+
+    private String getItemIdJson() {
+        // Use real item ID if available, otherwise use a fake one
+        long itemId = lastItemId != null ? lastItemId : (rng.nextLong(1000) + 1);
+        return String.format("{\"id\": %d}", itemId);
+    }
+
+    private String generatePriceValid(Field field) {
+        double price = 10.0 + rng.nextDouble() * 990.0; // 10-1000
+        String itemJson = getItemIdJson();
+        return String.format("{\"item\": %s, \"price\": %.2f}", itemJson, price);
+    }
+
+    private String generatePriceNullInject(Field field) {
+        double price = 10.0 + rng.nextDouble() * 100.0;
+        String itemJson = getItemIdJson();
+        
+        return switch (field) {
+            case PRICE -> "{\"item\": " + itemJson + ", \"price\": null}";
+            case ITEM_ID -> "{\"item\": null, \"price\": " + price + "}";
+            case ALL -> "{\"item\": null, \"price\": null}";
+            default -> {
+                int variant = rng.nextInt(2);
+                yield variant == 0 
+                    ? "{\"item\": null, \"price\": " + price + "}"
+                    : "{\"item\": " + itemJson + ", \"price\": null}";
+            }
+        };
+    }
+
+    private String generatePriceNegative(Field field, int magnitude) {
+        String itemJson = getItemIdJson();
+        double negPrice = -(rng.nextDouble() * magnitude + 1);
+        
+        return switch (field) {
+            case PRICE -> String.format("{\"item\": %s, \"price\": %.2f}", itemJson, negPrice);
+            case ITEM_ID -> "{\"item\": {\"id\": -1}, \"price\": 50.0}"; // Invalid item ID
+            case ALL -> String.format("{\"item\": {\"id\": -1}, \"price\": %.2f}", negPrice);
+            default -> String.format("{\"item\": %s, \"price\": %.2f}", itemJson, negPrice);
+        };
+    }
+
+    private String generatePriceBoundary(Field field, Intensity intensity) {
+        String itemJson = getItemIdJson();
+        
+        return switch (field) {
+            case PRICE -> switch (intensity) {
+                case MILD -> "{\"item\": " + itemJson + ", \"price\": 0}";
+                case MODERATE -> "{\"item\": " + itemJson + ", \"price\": " + Double.MAX_VALUE / 2 + "}";
+                case AGGRESSIVE -> "{\"item\": " + itemJson + ", \"price\": " + Double.MAX_VALUE + "}";
+            };
+            case ITEM_ID -> switch (intensity) {
+                case MILD -> "{\"item\": {\"id\": 0}, \"price\": 50.0}";
+                case MODERATE -> "{\"item\": {\"id\": " + Integer.MAX_VALUE + "}, \"price\": 50.0}";
+                case AGGRESSIVE -> "{\"item\": {\"id\": " + Long.MAX_VALUE + "}, \"price\": 50.0}";
+            };
+            default -> "{\"item\": {\"id\": 0}, \"price\": 0}";
+        };
+    }
+
+    private String generatePriceStructure(Field field) {
+        String itemJson = getItemIdJson();
+        double price = 50.0 + rng.nextDouble() * 50.0;
+        
+        return switch (field) {
+            case PRICE -> "{\"item\": " + itemJson + "}"; // Missing price
+            case ITEM_ID -> "{\"price\": " + price + "}"; // Missing item
+            case UNKNOWN -> "{\"item\": " + itemJson + ", \"price\": " + price + ", \"currency\": \"USD\", \"tax\": 0.1}";
+            case ALL -> "{}"; // Empty object
+            default -> {
+                int variant = rng.nextInt(3);
+                yield switch (variant) {
+                    case 0 -> "{}";
+                    case 1 -> "{\"price\": " + price + "}"; // Missing item
+                    case 2 -> "{\"item\": " + itemJson + "}"; // Missing price
+                    default -> generatePriceValid(field);
+                };
+            }
+        };
+    }
+
+    private String generatePriceInjection(Field field) {
+        String itemJson = getItemIdJson();
+        String[] injections = {
+            "'; DROP TABLE prices; --",
+            "1' OR '1'='1",
+            "<script>alert('xss')</script>",
+            "../../../etc/passwd"
+        };
+        String inject = injections[rng.nextInt(injections.length)];
+        
+        return switch (field) {
+            case PRICE -> "{\"item\": " + itemJson + ", \"price\": \"" + inject + "\"}";
+            case ITEM_ID -> "{\"item\": {\"id\": \"" + inject + "\"}, \"price\": 50.0}";
+            default -> "{\"item\": {\"id\": \"" + inject + "\"}, \"price\": \"" + inject + "\"}";
+        };
+    }
+
+    private String generatePriceTypeConfuse(Field field) {
+        String itemJson = getItemIdJson();
+        
+        return switch (field) {
+            case PRICE -> "{\"item\": " + itemJson + ", \"price\": \"not a number\"}";
+            case ITEM_ID -> "{\"item\": \"not an object\", \"price\": 50.0}";
+            case ALL -> "{\"item\": [1, 2, 3], \"price\": {\"value\": 50}}";
+            default -> {
+                int variant = rng.nextInt(3);
+                yield switch (variant) {
+                    case 0 -> "{\"item\": " + itemJson + ", \"price\": \"fifty dollars\"}";
+                    case 1 -> "{\"item\": 12345, \"price\": 50.0}";
+                    case 2 -> "{\"item\": " + itemJson + ", \"price\": [50, 60, 70]}";
+                    default -> generatePriceValid(field);
+                };
+            }
+        };
+    }
+
+    // ========================== DISCOUNTS Endpoint Generators ==========================
+
+    private String getPriceIdJson() {
+        // Use real price ID if available, otherwise use a fake one
+        long priceId = lastPriceId != null ? lastPriceId : (rng.nextLong(1000) + 1);
+        return String.format("{\"id\": %d}", priceId);
+    }
+
+    private String generateDiscountsPayload(Field field, Strategy strategy, Intensity intensity) {
+        int numMagnitude = getNumMagnitude(intensity);
+        
+        return switch (strategy) {
+            case VALID -> generateDiscountValid(field);
+            case NULL_INJECT -> generateDiscountNullInject(field);
+            case NEGATIVE -> generateDiscountNegative(field, numMagnitude);
+            case BOUNDARY -> generateDiscountBoundary(field, intensity);
+            case STRUCTURE -> generateDiscountStructure(field);
+            case INJECTION -> generateDiscountInjection(field);
+            case TYPE_CONFUSE -> generateDiscountTypeConfuse(field);
+            case ENCODING -> generateDiscountValid(field); // Encoding doesn't apply well to discounts
+            case NONE -> generateDiscountValid(field);
+        };
+    }
+
+    private String generateDiscountValid(Field field) {
+        double discount = rng.nextDouble() * 50.0; // 0-50% discount
+        String priceJson = getPriceIdJson();
+        return String.format("{\"price\": %s, \"discount\": %.2f}", priceJson, discount);
+    }
+
+    private String generateDiscountNullInject(Field field) {
+        double discount = 10.0 + rng.nextDouble() * 20.0;
+        String priceJson = getPriceIdJson();
+        
+        return switch (field) {
+            case PRICE -> "{\"price\": null, \"discount\": " + discount + "}";
+            case ALL -> "{\"price\": null, \"discount\": null}";
+            default -> {
+                int variant = rng.nextInt(2);
+                yield variant == 0 
+                    ? "{\"price\": null, \"discount\": " + discount + "}"
+                    : "{\"price\": " + priceJson + ", \"discount\": null}";
+            }
+        };
+    }
+
+    private String generateDiscountNegative(Field field, int magnitude) {
+        String priceJson = getPriceIdJson();
+        double negDiscount = -(rng.nextDouble() * Math.min(magnitude, 100) + 1); // Negative discount
+        
+        return switch (field) {
+            case PRICE -> "{\"price\": {\"id\": -1}, \"discount\": 10.0}"; // Invalid price ID
+            case ALL -> String.format("{\"price\": {\"id\": -1}, \"discount\": %.2f}", negDiscount);
+            default -> String.format("{\"price\": %s, \"discount\": %.2f}", priceJson, negDiscount);
+        };
+    }
+
+    private String generateDiscountBoundary(Field field, Intensity intensity) {
+        String priceJson = getPriceIdJson();
+        
+        return switch (field) {
+            case PRICE -> switch (intensity) {
+                case MILD -> "{\"price\": {\"id\": 0}, \"discount\": 10.0}";
+                case MODERATE -> "{\"price\": {\"id\": " + Integer.MAX_VALUE + "}, \"discount\": 10.0}";
+                case AGGRESSIVE -> "{\"price\": {\"id\": " + Long.MAX_VALUE + "}, \"discount\": 10.0}";
+            };
+            default -> switch (intensity) {
+                case MILD -> "{\"price\": " + priceJson + ", \"discount\": 0}";
+                case MODERATE -> "{\"price\": " + priceJson + ", \"discount\": 100}"; // 100% discount
+                case AGGRESSIVE -> "{\"price\": " + priceJson + ", \"discount\": " + Double.MAX_VALUE + "}";
+            };
+        };
+    }
+
+    private String generateDiscountStructure(Field field) {
+        String priceJson = getPriceIdJson();
+        double discount = 15.0 + rng.nextDouble() * 20.0;
+        
+        return switch (field) {
+            case PRICE -> "{\"discount\": " + discount + "}"; // Missing price
+            case UNKNOWN -> "{\"price\": " + priceJson + ", \"discount\": " + discount + ", \"code\": \"SAVE10\", \"expires\": \"2025-12-31\"}";
+            case ALL -> "{}"; // Empty object
+            default -> {
+                int variant = rng.nextInt(3);
+                yield switch (variant) {
+                    case 0 -> "{}";
+                    case 1 -> "{\"discount\": " + discount + "}"; // Missing price
+                    case 2 -> "{\"price\": " + priceJson + "}"; // Missing discount
+                    default -> generateDiscountValid(field);
+                };
+            }
+        };
+    }
+
+    private String generateDiscountInjection(Field field) {
+        String priceJson = getPriceIdJson();
+        String[] injections = {
+            "'; DROP TABLE discounts; --",
+            "1' OR '1'='1",
+            "<script>alert('xss')</script>",
+            "../../../etc/passwd"
+        };
+        String inject = injections[rng.nextInt(injections.length)];
+        
+        return switch (field) {
+            case PRICE -> "{\"price\": {\"id\": \"" + inject + "\"}, \"discount\": 10.0}";
+            default -> "{\"price\": {\"id\": \"" + inject + "\"}, \"discount\": \"" + inject + "\"}";
+        };
+    }
+
+    private String generateDiscountTypeConfuse(Field field) {
+        String priceJson = getPriceIdJson();
+        
+        return switch (field) {
+            case PRICE -> "{\"price\": \"not an object\", \"discount\": 10.0}";
+            case ALL -> "{\"price\": [1, 2, 3], \"discount\": {\"value\": 10}}";
+            default -> {
+                int variant = rng.nextInt(3);
+                yield switch (variant) {
+                    case 0 -> "{\"price\": " + priceJson + ", \"discount\": \"ten percent\"}";
+                    case 1 -> "{\"price\": 12345, \"discount\": 10.0}";
+                    case 2 -> "{\"price\": " + priceJson + ", \"discount\": [10, 20, 30]}";
+                    default -> generateDiscountValid(field);
+                };
+            }
         };
     }
 }

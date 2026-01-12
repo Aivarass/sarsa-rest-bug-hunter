@@ -24,8 +24,8 @@ public class SarsaRestTester {
 
     //ANN
     private int ANN_INPUTS = State.FEATURE_COUNT;
-    private int ANN_ACTIONS = StrategyBuilder.getActionCount();  // 22 actions
-    private int ANN_NEURONS = 8;
+    private int ANN_ACTIONS = StrategyBuilder.getActionCount();  // 32 actions
+    private int ANN_NEURONS = 16;
 
 
     //URL
@@ -34,12 +34,16 @@ public class SarsaRestTester {
 
     //HELPERS
     PayloadGenerator pbt;
-    private String lastId;
+    private String lastItemId;
+    private String lastPriceId;
+    private String lastDiscountId;
+    private String lastPointsId;
     
     // Tracking - raw actions
     private static LinkedHashMap<Integer, Integer> allActionCounts = new LinkedHashMap<>();
     
     // Tracking - strategy-level (what actually got executed)
+    private static LinkedHashMap<HttpType, Integer> httpTypeCounts = new LinkedHashMap<>();
     private static LinkedHashMap<Endpoint, Integer> endpointCounts = new LinkedHashMap<>();
     private static LinkedHashMap<Strategy, Integer> strategyCounts = new LinkedHashMap<>();
     private static LinkedHashMap<Field, Integer> fieldCounts = new LinkedHashMap<>();
@@ -86,8 +90,14 @@ public class SarsaRestTester {
                 System.out.printf("Execute ratio: %.1f%% (%d executes, %d dial-turners)%n", 
                         executeRatio, executeCount, dialTurnerCount);
                 
-                // Endpoint distribution
-                System.out.println("\n--- Endpoint Distribution ---");
+                // HttpType distribution (GET, POST, PUT, etc.)
+                System.out.println("\n--- HttpType Distribution ---");
+                for (Map.Entry<HttpType, Integer> e : httpTypeCounts.entrySet()) {
+                    System.out.printf("  %-10s: %d%n", e.getKey(), e.getValue());
+                }
+                
+                // Resource/Endpoint distribution (ITEMS, PRICES)
+                System.out.println("\n--- Resource Distribution ---");
                 for (Map.Entry<Endpoint, Integer> e : endpointCounts.entrySet()) {
                     System.out.printf("  %-10s: %d%n", e.getKey(), e.getValue());
                 }
@@ -132,6 +142,7 @@ public class SarsaRestTester {
                 totalBugs = 0;
                 startTime = System.currentTimeMillis();
                 allActionCounts.clear();
+                httpTypeCounts.clear();
                 endpointCounts.clear();
                 strategyCounts.clear();
                 fieldCounts.clear();
@@ -145,7 +156,10 @@ public class SarsaRestTester {
 
     private double[] executeEpisode(Random rng) {
         StrategyBuilder strategy = new StrategyBuilder();
-        lastId = null;  // Reset ID at episode start
+        lastItemId = null;
+        lastPriceId = null;
+        lastDiscountId = null;
+        lastPointsId = null;
         State currentState = initState();
         boolean[] mask = getValidMask(currentState, strategy);
         int currentAction = ann.epsilonGreedyMasked(currentState.scale(), EPSILON, mask, rng);
@@ -163,14 +177,17 @@ public class SarsaRestTester {
             if(strategy.isExecute(currentAction)){
                 // Track strategy combo before executing
                 trackStrategyExecution(strategy);
-                executedCombo = String.format("%s+%s+%s", 
-                        strategy.getEndpoint(), strategy.getStrategy(), strategy.getField());
+                executedCombo = String.format("%s+%s+%s+%s", 
+                        strategy.getHttpType(), strategy.getEndpoint(), strategy.getStrategy(), strategy.getField());
+                // Pass IDs to PayloadGenerator for PRICES/DISCOUNTS/POINTS endpoints
+                pbt.setLastItemId(lastItemId != null ? Long.parseLong(lastItemId) : null);
+                pbt.setLastPriceId(lastPriceId != null ? Long.parseLong(lastPriceId) : null);
+                pbt.setLastDiscountId(lastDiscountId != null ? Long.parseLong(lastDiscountId) : null);
                 response = executeWithStrategy(strategy);
-                strategy.reset();
-                currentState.resetAfterExecute();
                 executeCount++;
             }else{
                 currentState = strategy.applyAction(currentAction, currentState);
+                currentState.setStepsSinceExecute(Math.min(currentState.getStepsSinceExecute() + 1, 10));
                 dialTurnerCount++;
             }
 
@@ -178,6 +195,11 @@ public class SarsaRestTester {
             State nextState = updateStateFromResponse(currentState, strategy, response);
             boolean[] nextMask = getValidMask(nextState, strategy);
             int nextAction = ann.epsilonGreedyMasked(nextState.scale(), EPSILON, nextMask, rng);
+
+            if(response != null) {
+                strategy.reset();
+                nextState.resetAfterExecute();
+            }
 
             double reward = calculateReward(response, executedCombo);
             episodeReward += reward;
@@ -201,6 +223,7 @@ public class SarsaRestTester {
         if(response.getStatusCode() != 500){
             return 0;
         }
+
         // Track bug by strategy combo (captured before reset)
         if (executedCombo != null) {
             bugsByCombo.merge(executedCombo, 1, Integer::sum);
@@ -210,6 +233,7 @@ public class SarsaRestTester {
     }
     
     private void trackStrategyExecution(StrategyBuilder strategy) {
+        httpTypeCounts.merge(strategy.getHttpType(), 1, Integer::sum);
         endpointCounts.merge(strategy.getEndpoint(), 1, Integer::sum);
         strategyCounts.merge(strategy.getStrategy(), 1, Integer::sum);
         fieldCounts.merge(strategy.getField(), 1, Integer::sum);
@@ -218,16 +242,32 @@ public class SarsaRestTester {
 
 
     private Response executeWithStrategy(StrategyBuilder s) {
+        HttpType httpType = s.getHttpType();
         Endpoint endpoint = s.getEndpoint();
-        String payload = pbt.generate(s.getField(), s.getStrategy(), s.getIntensity());
+        // Generate endpoint-aware payload
+        String payload = pbt.generate(endpoint, s.getField(), s.getStrategy(), s.getIntensity());
 
-        return switch (endpoint) {
-            case POST -> postItem(payload);
-            case PUT -> putItem(payload);
-            case PATCH -> patchItem(payload);
-            case DELETE -> RestAssured.delete(BASE_URL + ITEMS + "/" + lastId);
-            case GET -> RestAssured.get(BASE_URL + ITEMS + "/" + lastId);
-            case GET_ALL -> RestAssured.get(BASE_URL + ITEMS);
+        String lastId;
+        if(endpoint == Endpoint.ITEMS){
+            lastId = lastItemId;
+        } else if (endpoint == Endpoint.PRICES) {
+            lastId = lastPriceId;
+        }else if (endpoint == Endpoint.DISCOUNTS){
+            lastId = lastDiscountId;
+        }else{
+            lastId = lastPointsId;
+        }
+
+        // Use lowercase endpoint name for URL (items, prices)
+        String endpointPath = endpoint.name().toLowerCase();
+
+        return switch (httpType) {
+            case POST -> postItem(payload, endpoint);
+            case PUT -> putItem(payload, endpoint);
+            case PATCH -> patchItem(payload, endpoint);
+            case DELETE -> RestAssured.delete(BASE_URL + endpointPath + "/" + lastId);
+            case GET -> RestAssured.get(BASE_URL + endpointPath + "/" + lastId);
+            case GET_ALL -> RestAssured.get(BASE_URL + endpointPath);
             default -> null;
         };
     }
@@ -236,37 +276,95 @@ public class SarsaRestTester {
         if (response == null) return state;  // Dial-turner, no response yet
 
         state.setLastStatusCall(response.statusCode());
-        Endpoint endpoint = strategy.getEndpoint();
-        state.setLastMethod(getMethodForEndpoint(endpoint));
+        HttpType httpType = strategy.getHttpType();
+        state.setLastMethod(getMethodForEndpoint(httpType));
+        state.setEndpoint(strategy.getEndpoint().ordinal());
 
         // POST success
-        if (endpoint == Endpoint.POST && response.statusCode() == 201) {
-            state.setHasValidId(1);
-            state.setHasAnyItems(1);
+        if (httpType == HttpType.POST && response.statusCode() == 201 && strategy.getEndpoint() == Endpoint.ITEMS) {
+            state.setHasValidItemId(1);
+            //removing for now
+//            state.setHasAnyItems(1);
         }
 
+        if (httpType == HttpType.POST && response.statusCode() == 201 && strategy.getEndpoint() == Endpoint.PRICES) {
+            state.setHasValidPriceId(1);
+            // removing for now
+//            state.setHasAnyItems(1);
+        }
+
+        if (httpType == HttpType.POST && response.statusCode() == 201 && strategy.getEndpoint() == Endpoint.DISCOUNTS) {
+            state.setHasValidDiscountId(1);
+            // removing for now
+//            state.setHasAnyItems(1);
+        }
+
+        if (httpType == HttpType.POST && response.statusCode() == 201 && strategy.getEndpoint() == Endpoint.POINTS) {
+            state.setHasValidPointsId(1);
+        }
+
+
         // DELETE success
-        if (endpoint == Endpoint.DELETE && (response.statusCode() == 200 || response.statusCode() == 204)) {
-            state.setHasValidId(0);
-            lastId = null;
+        if (httpType == HttpType.DELETE && (response.statusCode() == 200 || response.statusCode() == 204)  && strategy.getEndpoint() == Endpoint.ITEMS) {
+            state.setHasValidItemId(0);
+            lastItemId = null;
+        }
+
+        if (httpType == HttpType.DELETE && (response.statusCode() == 200 || response.statusCode() == 204)  && strategy.getEndpoint() == Endpoint.PRICES) {
+            state.setHasValidPriceId(0);
+            lastPriceId = null;
+        }
+
+        if (httpType == HttpType.DELETE && (response.statusCode() == 200 || response.statusCode() == 204)  && strategy.getEndpoint() == Endpoint.DISCOUNTS) {
+            state.setHasValidDiscountId(0);
+            lastDiscountId = null;
+        }
+
+        if (httpType == HttpType.DELETE && (response.statusCode() == 200 || response.statusCode() == 204)  && strategy.getEndpoint() == Endpoint.POINTS) {
+            state.setHasValidPointsId(0);
+            lastPointsId = null;
         }
 
         // GET_ALL - check if items exist
-        if (endpoint == Endpoint.GET_ALL && response.statusCode() == 200) {
-            extractIdFromGetAll(response);
-            if (lastId != null) {
-                state.setHasValidId(1);
+        if (httpType == HttpType.GET_ALL && response.statusCode() == 200 && strategy.getEndpoint() == Endpoint.ITEMS) {
+            extractIdFromGetAll(response, Endpoint.ITEMS);
+            if (lastItemId != null) {
+                state.setHasValidItemId(1);
                 state.setHasAnyItems(1);
             } else {
                 state.setHasAnyItems(0);
             }
         }
 
+        if (httpType == HttpType.GET_ALL && response.statusCode() == 200 && strategy.getEndpoint() == Endpoint.PRICES) {
+            extractIdFromGetAll(response, Endpoint.PRICES);
+            if (lastPriceId != null) {
+                state.setHasValidPriceId(1);
+//                state.setHasAnyItems(1);
+//            } else {
+//                state.setHasAnyItems(0);
+            }
+        }
+
+        if (httpType == HttpType.GET_ALL && response.statusCode() == 200 && strategy.getEndpoint() == Endpoint.DISCOUNTS) {
+            extractIdFromGetAll(response, Endpoint.DISCOUNTS);
+            if (lastDiscountId != null) {
+                state.setHasValidDiscountId(1);
+            }
+        }
+
+        if (httpType == HttpType.GET_ALL && response.statusCode() == 200 && strategy.getEndpoint() == Endpoint.POINTS) {
+            extractIdFromGetAll(response, Endpoint.POINTS);
+            if (lastPointsId != null) {
+                state.setHasValidPointsId(1);
+            }
+        }
+
         return state;
     }
 
-    private int getMethodForEndpoint(Endpoint endpoint) {
-        return switch (endpoint) {
+    private int getMethodForEndpoint(HttpType httpType) {
+        return switch (httpType) {
             case GET, GET_ALL -> 0;
             case POST -> 1;
             case PUT -> 2;
@@ -278,18 +376,28 @@ public class SarsaRestTester {
 
     private boolean[] getValidMask(State state, StrategyBuilder strategy) {
         boolean[] mask = new boolean[ANN_ACTIONS];
-        boolean hasId = state.getHasValidId() == 1;
+        boolean hasItemId = state.getHasValidItemId() == 1;
+        boolean hasPriceId = state.getHasValidPriceId() == 1;
+        boolean hasDiscountId = state.getHasValidDiscountId() == 1;
+        boolean hasPointsId = state.getHasValidPointsId() == 1;
+        Endpoint currentEndpoint = strategy.getEndpoint();
 
         for (int i = 0; i < ANN_ACTIONS; i++) {
-            // ID-dependent endpoint selections need ID
             if (StrategyBuilder.actionRequiresId(i)) {
-                mask[i] = hasId;
+                // ID-dependent actions need the correct ID for the current endpoint
+                if (currentEndpoint == Endpoint.ITEMS) {
+                    mask[i] = hasItemId;
+                } else if (currentEndpoint == Endpoint.PRICES) {
+                    mask[i] = hasPriceId;
+                } else if (currentEndpoint == Endpoint.DISCOUNTS) {
+                    mask[i] = hasDiscountId;
+                } else {
+                    mask[i] = hasPointsId;
+                }
             }
-            // EXECUTE only valid when endpoint is set
             else if (i == StrategyBuilder.getExecuteIndex()) {
                 mask[i] = strategy.isReady();
             }
-            // All other dial-turners always valid
             else {
                 mask[i] = true;
             }
@@ -298,45 +406,80 @@ public class SarsaRestTester {
     }
 
     // Helper methods
-    private Response postItem(String payload) {
+    private Response postItem(String payload, Endpoint endpoint) {
         Response response = RestAssured.given()
                 .contentType("application/json")
                 .body(payload)
-                .post(BASE_URL + ITEMS);
+                .post(BASE_URL + endpoint.name().toLowerCase());
 
         if (response.statusCode() == 201) {
-            lastId = response.jsonPath().getString("id");
+            String id = response.jsonPath().getString("id");
+            if(endpoint == Endpoint.ITEMS) {
+                lastItemId = id;
+            }else if (endpoint == Endpoint.PRICES){
+                lastPriceId = id;
+            }else if(endpoint == Endpoint.DISCOUNTS){
+                lastDiscountId = id;
+            }else{
+                lastPointsId = id;
+            }
         }
         return response;
     }
 
-    private Response putItem(String payload) {
+    public String getEndpointTarget(Endpoint endpoint){
+        if(endpoint == Endpoint.ITEMS){
+            return lastItemId;
+        } else if (endpoint == Endpoint.PRICES) {
+            return lastPriceId;
+        }else if (endpoint == Endpoint.DISCOUNTS){
+            return lastDiscountId;
+        }else{
+            return lastPointsId;
+        }
+    }
+
+    private Response putItem(String payload, Endpoint endpoint) {
+        String targetId = getEndpointTarget(endpoint);
+
         return RestAssured.given()
                 .contentType("application/json")
                 .body(payload)
-                .put(BASE_URL + ITEMS + "/" + lastId);
+                .put(BASE_URL + endpoint.name().toLowerCase() + "/" + targetId);
     }
 
-    private Response patchItem(String payload) {
+    private Response patchItem(String payload, Endpoint endpoint) {
+        String targetId = getEndpointTarget(endpoint);
+
         return RestAssured.given()
                 .contentType("application/json")
                 .body(payload)
-                .patch(BASE_URL + ITEMS + "/" + lastId);
+                .patch(BASE_URL + endpoint.name().toLowerCase() + "/" + targetId);
     }
 
-    private void extractIdFromGetAll(Response response) {
-        if (response.statusCode() != 200 || lastId != null) return;
-        
+    private void extractIdFromGetAll(Response response, Endpoint endpoint) {
+        if (response.statusCode() != 200) return;
+
         try {
             String firstId = response.jsonPath().getString("[0].id");
-            if (firstId != null) lastId = firstId;
+            if (firstId != null) {
+                if (endpoint == Endpoint.ITEMS) {
+                    lastItemId = firstId;
+                } else if (endpoint == Endpoint.PRICES) {
+                    lastPriceId = firstId;
+                } else if (endpoint == Endpoint.DISCOUNTS) {
+                    lastDiscountId = firstId;
+                } else{
+                    lastPointsId = firstId;
+                }
+            }
         } catch (Exception ignored) {
-            // Empty list or invalid JSON - no ID to extract
+            // Empty list or invalid JSON
         }
     }
 
     private State initState(){
-        return new State(0, 0, 0,0, 0, 0, 0, 0, 0, 0);
+        return new State(0,0, 0,0, 0, 0,0, 0, 0, 0, 0, 0, 0, 0);
     }
 
 

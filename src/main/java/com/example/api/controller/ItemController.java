@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicLong;
 @RequestMapping("/api/items")
 public class ItemController {
 
-    private final Map<Long, Item> items = new ConcurrentHashMap<>();
+    public final static Map<Long, Item> items = new ConcurrentHashMap<>();
     private final AtomicLong idCounter = new AtomicLong(1);
 
     // GET all items
