@@ -24,8 +24,8 @@ public class SarsaRestTester {
 
     //ANN
     private int ANN_INPUTS = State.FEATURE_COUNT;
-    private int ANN_ACTIONS = StrategyBuilder.getActionCount();  // 29 actions
-    private int ANN_NEURONS = 8;
+    private int ANN_ACTIONS = StrategyBuilder.getActionCount();  // 32 actions
+    private int ANN_NEURONS = 16;
 
 
     //URL
@@ -37,6 +37,7 @@ public class SarsaRestTester {
     private String lastItemId;
     private String lastPriceId;
     private String lastDiscountId;
+    private String lastPointsId;
     
     // Tracking - raw actions
     private static LinkedHashMap<Integer, Integer> allActionCounts = new LinkedHashMap<>();
@@ -158,6 +159,7 @@ public class SarsaRestTester {
         lastItemId = null;
         lastPriceId = null;
         lastDiscountId = null;
+        lastPointsId = null;
         State currentState = initState();
         boolean[] mask = getValidMask(currentState, strategy);
         int currentAction = ann.epsilonGreedyMasked(currentState.scale(), EPSILON, mask, rng);
@@ -177,9 +179,10 @@ public class SarsaRestTester {
                 trackStrategyExecution(strategy);
                 executedCombo = String.format("%s+%s+%s+%s", 
                         strategy.getHttpType(), strategy.getEndpoint(), strategy.getStrategy(), strategy.getField());
-                // Pass IDs to PayloadGenerator for PRICES/DISCOUNTS endpoints
+                // Pass IDs to PayloadGenerator for PRICES/DISCOUNTS/POINTS endpoints
                 pbt.setLastItemId(lastItemId != null ? Long.parseLong(lastItemId) : null);
                 pbt.setLastPriceId(lastPriceId != null ? Long.parseLong(lastPriceId) : null);
+                pbt.setLastDiscountId(lastDiscountId != null ? Long.parseLong(lastDiscountId) : null);
                 response = executeWithStrategy(strategy);
                 executeCount++;
             }else{
@@ -249,8 +252,10 @@ public class SarsaRestTester {
             lastId = lastItemId;
         } else if (endpoint == Endpoint.PRICES) {
             lastId = lastPriceId;
-        }else{
+        }else if (endpoint == Endpoint.DISCOUNTS){
             lastId = lastDiscountId;
+        }else{
+            lastId = lastPointsId;
         }
 
         // Use lowercase endpoint name for URL (items, prices)
@@ -294,6 +299,10 @@ public class SarsaRestTester {
 //            state.setHasAnyItems(1);
         }
 
+        if (httpType == HttpType.POST && response.statusCode() == 201 && strategy.getEndpoint() == Endpoint.POINTS) {
+            state.setHasValidPointsId(1);
+        }
+
 
         // DELETE success
         if (httpType == HttpType.DELETE && (response.statusCode() == 200 || response.statusCode() == 204)  && strategy.getEndpoint() == Endpoint.ITEMS) {
@@ -309,6 +318,11 @@ public class SarsaRestTester {
         if (httpType == HttpType.DELETE && (response.statusCode() == 200 || response.statusCode() == 204)  && strategy.getEndpoint() == Endpoint.DISCOUNTS) {
             state.setHasValidDiscountId(0);
             lastDiscountId = null;
+        }
+
+        if (httpType == HttpType.DELETE && (response.statusCode() == 200 || response.statusCode() == 204)  && strategy.getEndpoint() == Endpoint.POINTS) {
+            state.setHasValidPointsId(0);
+            lastPointsId = null;
         }
 
         // GET_ALL - check if items exist
@@ -339,6 +353,13 @@ public class SarsaRestTester {
             }
         }
 
+        if (httpType == HttpType.GET_ALL && response.statusCode() == 200 && strategy.getEndpoint() == Endpoint.POINTS) {
+            extractIdFromGetAll(response, Endpoint.POINTS);
+            if (lastPointsId != null) {
+                state.setHasValidPointsId(1);
+            }
+        }
+
         return state;
     }
 
@@ -358,6 +379,7 @@ public class SarsaRestTester {
         boolean hasItemId = state.getHasValidItemId() == 1;
         boolean hasPriceId = state.getHasValidPriceId() == 1;
         boolean hasDiscountId = state.getHasValidDiscountId() == 1;
+        boolean hasPointsId = state.getHasValidPointsId() == 1;
         Endpoint currentEndpoint = strategy.getEndpoint();
 
         for (int i = 0; i < ANN_ACTIONS; i++) {
@@ -367,8 +389,10 @@ public class SarsaRestTester {
                     mask[i] = hasItemId;
                 } else if (currentEndpoint == Endpoint.PRICES) {
                     mask[i] = hasPriceId;
-                } else {
+                } else if (currentEndpoint == Endpoint.DISCOUNTS) {
                     mask[i] = hasDiscountId;
+                } else {
+                    mask[i] = hasPointsId;
                 }
             }
             else if (i == StrategyBuilder.getExecuteIndex()) {
@@ -394,8 +418,10 @@ public class SarsaRestTester {
                 lastItemId = id;
             }else if (endpoint == Endpoint.PRICES){
                 lastPriceId = id;
-            }else{
+            }else if(endpoint == Endpoint.DISCOUNTS){
                 lastDiscountId = id;
+            }else{
+                lastPointsId = id;
             }
         }
         return response;
@@ -406,8 +432,10 @@ public class SarsaRestTester {
             return lastItemId;
         } else if (endpoint == Endpoint.PRICES) {
             return lastPriceId;
-        }else{
+        }else if (endpoint == Endpoint.DISCOUNTS){
             return lastDiscountId;
+        }else{
+            return lastPointsId;
         }
     }
 
@@ -439,8 +467,10 @@ public class SarsaRestTester {
                     lastItemId = firstId;
                 } else if (endpoint == Endpoint.PRICES) {
                     lastPriceId = firstId;
-                } else {
+                } else if (endpoint == Endpoint.DISCOUNTS) {
                     lastDiscountId = firstId;
+                } else{
+                    lastPointsId = firstId;
                 }
             }
         } catch (Exception ignored) {
@@ -449,7 +479,7 @@ public class SarsaRestTester {
     }
 
     private State initState(){
-        return new State(0, 0,0, 0, 0,0, 0, 0, 0, 0, 0, 0, 0);
+        return new State(0,0, 0,0, 0, 0,0, 0, 0, 0, 0, 0, 0, 0);
     }
 
 

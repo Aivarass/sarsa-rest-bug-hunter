@@ -13,13 +13,14 @@ public class State {
     private int hasValidItemId;
     private int hasValidPriceId;
     private int hasValidDiscountId;
+    private int hasValidPointsId;
     private int hasAnyItems;    // 0 or 1
     private int lastStatusCall; // e.g., 200, 201, 400, 404, 500
     private int lastMethod;     // 0=GET, 1=POST, 2=PUT, 3=DELETE, 4=PATCH
 
     //strategy related
     private int httpType;   // 0=NONE, 1=GET, 2=POST, etc.
-    private int endpoint;   // 0=ITEMS, 1=PRICES, 2=DISCOUNTS
+    private int endpoint;   // 0=ITEMS, 1=PRICES, 2=DISCOUNTS, 3=POINTS
     private int currentField;      // 0=NONE, 1=NAME, 2=QTY, etc.
     private int currentStrategy;   // 0=NONE, 1=VALID, 2=NULL_INJECT, etc.
     private int currentIntensity;  // 0=MILD, 1=MOD, 2=AGGRESSIVE
@@ -27,7 +28,7 @@ public class State {
 
     private int isReadyToExecute;
 
-    public static final int FEATURE_COUNT = 13;
+    public static final int FEATURE_COUNT = 14;
 
     /**
      * Scales and normalizes state into double[] for neural network input.
@@ -40,22 +41,23 @@ public class State {
         features[0] = hasValidItemId;
         features[1] = hasValidPriceId;
         features[2] = hasValidDiscountId;
-        features[3] = hasAnyItems;
+        features[3] = hasValidPointsId;
+        features[4] = hasAnyItems;
 
         // Status code: group by category (2xx, 4xx, 5xx matter most)
-        features[4] = normalizeStatusCode(lastStatusCall);
+        features[5] = normalizeStatusCode(lastStatusCall);
 
         // Method: 5 buckets (0-4) → normalized to [0, 1]
-        features[5] = lastMethod / 4.0;
+        features[6] = lastMethod / 4.0;
 
         // Strategy
-        features[6] = httpType / 6.0;           // 7 HttpTypes (0-6 including NONE)
-        features[7] = endpoint / 2.0;           // 3 endpoints: ITEMS=0, PRICES=1, DISCOUNTS=2
-        features[8] = currentField / 9.0;       // 9 fields
-        features[9] = currentStrategy / 8.0;    // 9 strategies (0-8 including NONE)
-        features[10] = currentIntensity / 2.0;   // 3 intensities (0-2)
-        features[11] = Math.min(stepsSinceExecute, 10) / 10.0;  // Capped at 10
-        features[12] = isReadyToExecute;        // Binary 0 or 1
+        features[7] = httpType / 6.0;           // 7 HttpTypes (0-6 including NONE)
+        features[8] = endpoint / 3.0;           // 4 endpoints: ITEMS=0, PRICES=1, DISCOUNTS=2, POINTS=3
+        features[9] = currentField / 11.0;      // 12 fields (0-11 including POINTS_ID, POINTS)
+        features[10] = currentStrategy / 8.0;    // 9 strategies (0-8 including NONE)
+        features[11] = currentIntensity / 2.0;   // 3 intensities (0-2)
+        features[12] = Math.min(stepsSinceExecute, 10) / 10.0;  // Capped at 10
+        features[13] = isReadyToExecute;        // Binary 0 or 1
 
 
         return features;

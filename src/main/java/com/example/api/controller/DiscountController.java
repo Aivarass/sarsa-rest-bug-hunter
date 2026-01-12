@@ -1,7 +1,6 @@
 package com.example.api.controller;
 
 import com.example.api.model.Discount;
-import com.example.api.model.Item;
 import com.example.api.model.Price;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -17,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
 @RequestMapping("/api/discounts")
 public class DiscountController {
 
-    private final Map<Long, Discount> discounts = new ConcurrentHashMap<>();
+    public static final Map<Long, Discount> discounts = new ConcurrentHashMap<>();
     private final AtomicLong idCounter = new AtomicLong(1);
 
     // GET all discounts

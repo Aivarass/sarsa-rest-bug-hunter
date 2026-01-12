@@ -216,6 +216,7 @@ public class PayloadGenerator {
     // Track IDs for nested resource generation (set by SarsaRestTester)
     private Long lastItemId = null;
     private Long lastPriceId = null;
+    private Long lastDiscountId = null;
 
     public void setLastItemId(Long itemId) {
         this.lastItemId = itemId;
@@ -223,6 +224,10 @@ public class PayloadGenerator {
 
     public void setLastPriceId(Long priceId) {
         this.lastPriceId = priceId;
+    }
+
+    public void setLastDiscountId(Long discountId) {
+        this.lastDiscountId = discountId;
     }
 
     /**
@@ -234,6 +239,135 @@ public class PayloadGenerator {
             case ITEMS -> generateItemsPayload(field, strategy, intensity);
             case PRICES -> generatePricesPayload(field, strategy, intensity);
             case DISCOUNTS -> generateDiscountsPayload(field, strategy, intensity);
+            case POINTS -> generatePointsPayload(field, strategy, intensity);
+        };
+    }
+
+    private String generatePointsPayload(Field field, Strategy strategy, Intensity intensity) {
+        int numMagnitude = getNumMagnitude(intensity);
+        
+        return switch (strategy) {
+            case VALID -> generatePointsValid(field);
+            case NULL_INJECT -> generatePointsNullInject(field);
+            case NEGATIVE -> generatePointsNegative(field, numMagnitude);
+            case BOUNDARY -> generatePointsBoundary(field, intensity);
+            case STRUCTURE -> generatePointsStructure(field);
+            case INJECTION -> generatePointsInjection(field);
+            case TYPE_CONFUSE -> generatePointsTypeConfuse(field);
+            case ENCODING -> generatePointsValid(field);
+            case NONE -> generatePointsValid(field);
+        };
+    }
+
+    private String getDiscountIdJson() {
+        long discountId = lastDiscountId != null ? lastDiscountId : (rng.nextLong(1000) + 1);
+        return String.format("{\"id\": %d}", discountId);
+    }
+
+    private String generatePointsValid(Field field) {
+        int points = rng.nextInt(1000) + 1; // 1-1000 points
+        String discountJson = getDiscountIdJson();
+        return String.format("{\"discount\": %s, \"points\": %d}", discountJson, points);
+    }
+
+    private String generatePointsNullInject(Field field) {
+        int points = 100 + rng.nextInt(200);
+        String discountJson = getDiscountIdJson();
+        
+        return switch (field) {
+            case DISCOUNT, DISCOUNT_ID -> "{\"discount\": null, \"points\": " + points + "}";
+            case POINTS -> "{\"discount\": " + discountJson + ", \"points\": null}";
+            case ALL -> "{\"discount\": null, \"points\": null}";
+            default -> {
+                int variant = rng.nextInt(2);
+                yield variant == 0 
+                    ? "{\"discount\": null, \"points\": " + points + "}"
+                    : "{\"discount\": " + discountJson + ", \"points\": null}";
+            }
+        };
+    }
+
+    private String generatePointsNegative(Field field, int magnitude) {
+        String discountJson = getDiscountIdJson();
+        int negPoints = -(rng.nextInt(magnitude) + 1);
+        
+        return switch (field) {
+            case DISCOUNT, DISCOUNT_ID -> "{\"discount\": {\"id\": -1}, \"points\": 100}";
+            case ALL -> String.format("{\"discount\": {\"id\": -1}, \"points\": %d}", negPoints);
+            default -> String.format("{\"discount\": %s, \"points\": %d}", discountJson, negPoints);
+        };
+    }
+
+    private String generatePointsBoundary(Field field, Intensity intensity) {
+        String discountJson = getDiscountIdJson();
+        
+        return switch (field) {
+            case DISCOUNT, DISCOUNT_ID -> switch (intensity) {
+                case MILD -> "{\"discount\": {\"id\": 0}, \"points\": 100}";
+                case MODERATE -> "{\"discount\": {\"id\": " + Integer.MAX_VALUE + "}, \"points\": 100}";
+                case AGGRESSIVE -> "{\"discount\": {\"id\": " + Long.MAX_VALUE + "}, \"points\": 100}";
+            };
+            default -> switch (intensity) {
+                case MILD -> "{\"discount\": " + discountJson + ", \"points\": 0}";
+                case MODERATE -> "{\"discount\": " + discountJson + ", \"points\": " + Integer.MAX_VALUE + "}";
+                case AGGRESSIVE -> "{\"discount\": " + discountJson + ", \"points\": " + Long.MAX_VALUE + "}";
+            };
+        };
+    }
+
+    private String generatePointsStructure(Field field) {
+        String discountJson = getDiscountIdJson();
+        int points = 100 + rng.nextInt(200);
+        
+        return switch (field) {
+            case DISCOUNT, DISCOUNT_ID -> "{\"points\": " + points + "}"; // Missing discount
+            case POINTS -> "{\"discount\": " + discountJson + "}"; // Missing points
+            case UNKNOWN -> "{\"discount\": " + discountJson + ", \"points\": " + points + ", \"bonus\": true, \"tier\": \"gold\"}";
+            case ALL -> "{}";
+            default -> {
+                int variant = rng.nextInt(3);
+                yield switch (variant) {
+                    case 0 -> "{}";
+                    case 1 -> "{\"points\": " + points + "}";
+                    case 2 -> "{\"discount\": " + discountJson + "}";
+                    default -> generatePointsValid(field);
+                };
+            }
+        };
+    }
+
+    private String generatePointsInjection(Field field) {
+        String discountJson = getDiscountIdJson();
+        String[] injections = {
+            "'; DROP TABLE points; --",
+            "1' OR '1'='1",
+            "<script>alert('xss')</script>",
+            "../../../etc/passwd"
+        };
+        String inject = injections[rng.nextInt(injections.length)];
+        
+        return switch (field) {
+            case DISCOUNT, DISCOUNT_ID -> "{\"discount\": {\"id\": \"" + inject + "\"}, \"points\": 100}";
+            default -> "{\"discount\": {\"id\": \"" + inject + "\"}, \"points\": \"" + inject + "\"}";
+        };
+    }
+
+    private String generatePointsTypeConfuse(Field field) {
+        String discountJson = getDiscountIdJson();
+        
+        return switch (field) {
+            case DISCOUNT, DISCOUNT_ID -> "{\"discount\": \"not an object\", \"points\": 100}";
+            case POINTS -> "{\"discount\": " + discountJson + ", \"points\": \"one hundred\"}";
+            case ALL -> "{\"discount\": [1, 2, 3], \"points\": {\"value\": 100}}";
+            default -> {
+                int variant = rng.nextInt(3);
+                yield switch (variant) {
+                    case 0 -> "{\"discount\": " + discountJson + ", \"points\": \"hundred\"}";
+                    case 1 -> "{\"discount\": 12345, \"points\": 100}";
+                    case 2 -> "{\"discount\": " + discountJson + ", \"points\": [100, 200, 300]}";
+                    default -> generatePointsValid(field);
+                };
+            }
         };
     }
 

@@ -16,6 +16,7 @@ public class StrategyState {
 
     public void reset() {
         this.httpType = HttpType.NONE;
+        this.endpoint = Endpoint.ITEMS;
         this.field = Field.ALL;
         this.strategy = Strategy.VALID;
         this.intensity = Intensity.MILD;

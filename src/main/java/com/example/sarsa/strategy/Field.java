@@ -15,6 +15,8 @@ public enum Field {
     ITEM_ID,        // Target "itemId" field (PRICES) - needs valid item!
     DISCOUNT_ID,
     DISCOUNT,
+    POINTS_ID,
+    POINTS,
     ALL,            // Apply to all fields
     UNKNOWN         // Add unknown/extra fields
 }

@@ -16,12 +16,13 @@ public enum Action {
     EXPLORE_PATCH,
     EXPLORE_DELETE,
 
-    // ========================== Endpoint (3) ==========================
+    // ========================== Endpoint (4) ==========================
     INSPECT_ITEMS,
     INSPECT_PRICES,
     INSPECT_DISCOUNTS,
+    INSPECT_POINTS,
 
-    // ========================== Field Targeting (9) ==========================
+    // ========================== Field Targeting (11) ==========================
     FOCUS_NAME,         // ITEMS: name field
     FOCUS_QUANTITY,     // ITEMS: quantity field
     FOCUS_DESCRIPTION,  // ITEMS: description field
@@ -29,6 +30,8 @@ public enum Action {
     FOCUS_ITEM_ID,      // PRICES: itemId field (needs valid item!)
     FOCUS_DISCOUNT_ID,
     FOCUS_DISCOUNT,
+    FOCUS_POINTS_ID,
+    FOCUS_POINTS,
     FOCUS_ALL,          // Apply to all fields
     FOCUS_UNKNOWN,      // Add unknown/extra fields
 
@@ -105,6 +108,10 @@ public enum Action {
                 state.setEndpoint(Endpoint.DISCOUNTS.ordinal());
                 strategy.setEndpoint(Endpoint.DISCOUNTS);
             }
+            case INSPECT_POINTS -> {
+                state.setEndpoint(Endpoint.POINTS.ordinal());
+                strategy.setEndpoint(Endpoint.POINTS);
+            }
 
             // Fields
             case FOCUS_NAME -> {
@@ -134,6 +141,14 @@ public enum Action {
             case FOCUS_DISCOUNT -> {
                 state.setCurrentField(Field.DISCOUNT.ordinal());
                 strategy.setField(Field.DISCOUNT);
+            }
+            case FOCUS_POINTS_ID -> {
+                state.setCurrentField(Field.POINTS_ID.ordinal());
+                strategy.setField(Field.POINTS_ID);
+            }
+            case FOCUS_POINTS -> {
+                state.setCurrentField(Field.POINTS.ordinal());
+                strategy.setField(Field.POINTS);
             }
             case FOCUS_ALL -> {
                 state.setCurrentField(Field.ALL.ordinal());
