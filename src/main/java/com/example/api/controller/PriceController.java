@@ -39,15 +39,15 @@ public class PriceController {
     @PostMapping
     public ResponseEntity<Price> createPrice(@RequestBody Price price) {
         if (price.getItem() == null || price.getItem().getId() == null) {
-            return ResponseEntity.internalServerError().body(null);
+            return ResponseEntity.notFound().build();
         }
         if (!ItemController.items.containsKey(price.getItem().getId())) {
             return ResponseEntity.notFound().build();
         }
         // BUG: Negative price causes server error
-        if (price.getPrice() < 0) {
-            return ResponseEntity.internalServerError().body(null);
-        }
+//        if (price.getPrice() < 0) {
+//            return ResponseEntity.internalServerError().body(null);
+//        }
         Long id = idCounter.getAndIncrement();
         price.setId(id);
         prices.put(id, price);
@@ -105,9 +105,9 @@ public class PriceController {
             return ResponseEntity.notFound().build();
         }
         // BUG: Delete always throws server error (same pattern as items)
-        return ResponseEntity.internalServerError().body(null);
-        // prices.remove(id);
-        // return ResponseEntity.noContent().build();
+//        return ResponseEntity.internalServerError().body(null);
+         prices.remove(id);
+         return ResponseEntity.noContent().build();
     }
 
     // DELETE all prices

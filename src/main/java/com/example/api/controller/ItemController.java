@@ -37,9 +37,9 @@ public class ItemController {
     // POST - create new item
     @PostMapping
     public ResponseEntity<Item> createItem(@RequestBody Item item) {
-        if(item.getQuantity() < 0 ){
-            return ResponseEntity.internalServerError().body(null);
-        }
+//        if(item.getQuantity() < 0 ){
+//            return ResponseEntity.internalServerError().body(null);
+//        }
         Long id = idCounter.getAndIncrement();
         item.setId(id);
         items.put(id, item);
@@ -84,11 +84,12 @@ public class ItemController {
     public ResponseEntity<Void> deleteItem(@PathVariable Long id) {
         if (!items.containsKey(id)) {
             return ResponseEntity.notFound().build();
-        }else{
-            return ResponseEntity.internalServerError().body(null);
         }
-//        items.remove(id);
-//        return ResponseEntity.noContent().build();
+//        else{
+//            return ResponseEntity.internalServerError().body(null);
+//        }
+        items.remove(id);
+        return ResponseEntity.noContent().build();
     }
 
     // DELETE all items

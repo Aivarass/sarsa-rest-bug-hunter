@@ -39,15 +39,15 @@ public class PointsController {
     @PostMapping
     public ResponseEntity<Point> createPoints(@RequestBody Point point) {
         if (point.getDiscount() == null || point.getDiscount().getId() == null) {
-            return ResponseEntity.internalServerError().body(null);
+            return ResponseEntity.notFound().build();
         }
         if (!DiscountController.discounts.containsKey(point.getDiscount().getId())) {
             return ResponseEntity.notFound().build();
         }
 
-        if (point.getPoints() < 0) {
-            return ResponseEntity.internalServerError().body(null);
-        }
+//        if (point.getPoints() < 0) {
+//            return ResponseEntity.internalServerError().body(null);
+//        }
         Long id = idCounter.getAndIncrement();
         point.setId(id);
         points.put(id, point);
@@ -104,8 +104,15 @@ public class PointsController {
         if (!points.containsKey(id)) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.internalServerError().body(null);
+        Point point = points.get(id);
+        if (point.getDiscount().getPrice().getPrice() < 0){
+            return ResponseEntity.internalServerError().body(null);
+        }
+//        return ResponseEntity.internalServerError().body(null);
+        points.remove(id);
+        return ResponseEntity.noContent().build();
     }
+
 
 
     @DeleteMapping

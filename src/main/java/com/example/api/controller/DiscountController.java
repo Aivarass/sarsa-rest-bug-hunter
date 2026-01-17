@@ -39,15 +39,15 @@ public class DiscountController {
     @PostMapping
     public ResponseEntity<Discount> createDiscount(@RequestBody Discount discount) {
         if (discount.getPrice() == null || discount.getPrice().getId() == null) {
-            return ResponseEntity.internalServerError().body(null);
+            return ResponseEntity.notFound().build();
         }
         if (!PriceController.prices.containsKey(discount.getPrice().getId())) {
             return ResponseEntity.notFound().build();
         }
 
-        if (discount.getDiscount() < 0) {
-            return ResponseEntity.internalServerError().body(null);
-        }
+//        if (discount.getDiscount() < 0) {
+//            return ResponseEntity.internalServerError().body(null);
+//        }
         Long id = idCounter.getAndIncrement();
         discount.setId(id);
         discounts.put(id, discount);
@@ -104,7 +104,9 @@ public class DiscountController {
         if (!discounts.containsKey(id)) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.internalServerError().body(null);
+        discounts.remove(id);
+//        return ResponseEntity.internalServerError().body(null);
+        return ResponseEntity.noContent().build();
     }
 
 
