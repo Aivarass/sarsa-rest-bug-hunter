@@ -8,11 +8,14 @@ import io.restassured.RestAssured;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.util.*;
 
 public class SarsaRestTester {
 
-    private int EPISODES = 200_000;
+    private int EPISODES = 70_000;
     private int LOG_EVERY = 10_000;
     private int SEED = 1234;
     private int STEP_LIMIT = 35;
@@ -56,6 +59,13 @@ public class SarsaRestTester {
     // Tracking - execute vs dial-turner ratio
     private static int executeCount = 0;
     private static int dialTurnerCount = 0;
+    
+    // Tracking - for chart/demo
+    private static List<int[]> chartData = new ArrayList<>();  // [episode, hiddenBugHitsThisWindow]
+    private static boolean hiddenBugDiscovered = false;
+    private static int hiddenBugFirstEpisode = -1;
+    private static int hiddenBugCount = 0;
+    private static int hiddenBugHitsThisWindow = 0;  // Resets each LOG_EVERY
 
 
     TinyQNetwork ann;
@@ -65,6 +75,7 @@ public class SarsaRestTester {
         pbt = new PayloadGenerator(SEED);
         ann = new TinyQNetwork(ANN_INPUTS, ANN_NEURONS, ANN_ACTIONS, SEED);
         executeSarsa(EPISODES);
+        exportChartData();
     }
 
     private void executeSarsa(int episodes) {
@@ -75,9 +86,14 @@ public class SarsaRestTester {
         long startTime = System.currentTimeMillis();
         
         for (int i = 1; i <= episodes; i++) {
-            double[] result = executeEpisode(rng);
+            double[] result = executeEpisode(rng, i);
             totalReward += result[0];
             totalBugs += result[1];
+            
+            // Record data point every 1000 episodes for chart
+            if (i % 1000 == 0) {
+                chartData.add(new int[]{i, hiddenBugHitsThisWindow});
+            }
             
             if (i % LOG_EVERY == 0) {
                 double avgReward = totalReward / LOG_EVERY;
@@ -150,11 +166,12 @@ public class SarsaRestTester {
                 bugsByCombo.clear();
                 executeCount = 0;
                 dialTurnerCount = 0;
+                hiddenBugHitsThisWindow = 0;
             }
         }
     }
 
-    private double[] executeEpisode(Random rng) {
+    private double[] executeEpisode(Random rng, int episodeNum) {
         StrategyBuilder strategy = new StrategyBuilder();
         lastItemId = null;
         lastPriceId = null;
@@ -201,7 +218,7 @@ public class SarsaRestTester {
                 nextState.resetAfterExecute();
             }
 
-            double reward = calculateReward(response, executedCombo);
+            double reward = calculateReward(response, executedCombo, episodeNum);
             episodeReward += reward;
             if (reward > 0) bugsFound++;  // Only count novel bugs
             
@@ -216,7 +233,7 @@ public class SarsaRestTester {
         return new double[]{episodeReward, bugsFound};
     }
 
-    private double calculateReward(Response response, String executedCombo){
+    private double calculateReward(Response response, String executedCombo, int episodeNum){
         if (response == null) {
             return -0.15;
         }
@@ -228,8 +245,36 @@ public class SarsaRestTester {
         if (executedCombo != null) {
             bugsByCombo.merge(executedCombo, 1, Integer::sum);
             uniqueBugCombos.add(executedCombo);
+            
+            // Check for HIDDEN BUG: DELETE+POINTS with any strategy
+            if (executedCombo.startsWith("DELETE+POINTS+")) {
+                hiddenBugCount++;
+                hiddenBugHitsThisWindow++;
+                logHiddenBugDiscovery(executedCombo, episodeNum);
+            }
         }
         return 10;
+    }
+    
+    private void logHiddenBugDiscovery(String combo, int episodeNum) {
+        if (!hiddenBugDiscovered) {
+            hiddenBugDiscovered = true;
+            hiddenBugFirstEpisode = episodeNum;
+            System.out.println();
+            System.out.println("╔════════════════════════════════════════════════════════════════╗");
+            System.out.println("║              HIDDEN BUG DISCOVERED!                          ║");
+            System.out.println("╠════════════════════════════════════════════════════════════════╣");
+            System.out.printf("║  Episode:    %,d%n", episodeNum);
+            System.out.printf("║  Combo:      %s%n", combo);
+            System.out.println("║  Condition:  DELETE POINTS → 500 (ancestor price < 0)          ║");
+            System.out.println("║  Chain:      ITEM → PRICE(neg) → DISCOUNT → POINTS → DELETE   ║");
+            System.out.println("╚════════════════════════════════════════════════════════════════╝");
+            System.out.println();
+        } else {
+            // Subsequent discoveries - shorter log
+            System.out.printf(" HIDDEN BUG HIT #%d @ Episode %,d | %s | HTTP 500%n",
+                    hiddenBugCount, episodeNum, combo);
+        }
     }
     
     private void trackStrategyExecution(StrategyBuilder strategy) {
@@ -481,7 +526,208 @@ public class SarsaRestTester {
     private State initState(){
         return new State(0,0, 0,0, 0, 0,0, 0, 0, 0, 0, 0, 0, 0);
     }
+    
+    private void exportChartData() {
+        // Export CSV for external charting
+        try (PrintWriter csv = new PrintWriter(new FileWriter("bug_discovery.csv"))) {
+            csv.println("episode,hidden_bug_hits");
+            for (int[] data : chartData) {
+                csv.printf("%d,%d%n", data[0], data[1]);
+            }
+            System.out.println("\nChart data exported to: bug_discovery.csv");
+        } catch (IOException e) {
+            System.err.println("Failed to export CSV: " + e.getMessage());
+        }
+        
+        // Export HTML chart with Chart.js
+        try (PrintWriter html = new PrintWriter(new FileWriter("bug_discovery_chart.html"))) {
+            html.println(generateChartHtml());
+            System.out.println("Interactive chart exported to: bug_discovery_chart.html");
+        } catch (IOException e) {
+            System.err.println("Failed to export HTML: " + e.getMessage());
+        }
+        
+        // Summary
+        System.out.println("\n" + "=".repeat(60));
+        System.out.println("FINAL SUMMARY");
+        System.out.println("=".repeat(60));
+        System.out.printf("Total unique bugs discovered: %d%n", uniqueBugCombos.size());
+        System.out.printf("Hidden bug (DELETE+POINTS) hits: %d%n", hiddenBugCount);
+        if (hiddenBugFirstEpisode > 0) {
+            System.out.printf("Hidden bug first discovered at episode: %,d%n", hiddenBugFirstEpisode);
+        } else {
+            System.out.println("Hidden bug was NOT discovered in this run.");
+        }
+    }
+    
+    private String generateChartHtml() {
+        StringBuilder episodes = new StringBuilder("[");
+        StringBuilder hiddenHits = new StringBuilder("[");
+        
+        for (int i = 0; i < chartData.size(); i++) {
+            int[] data = chartData.get(i);
+            if (i > 0) {
+                episodes.append(",");
+                hiddenHits.append(",");
+            }
+            episodes.append(data[0]);
+            hiddenHits.append(data[1]);
+        }
+        episodes.append("]");
+        hiddenHits.append("]");
+        
+        String markerAnnotation = "";
+        if (hiddenBugFirstEpisode > 0) {
+            markerAnnotation = String.format("""
+                annotation: {
+                    annotations: {
+                        hiddenBug: {
+                            type: 'line',
+                            xMin: %d,
+                            xMax: %d,
+                            borderColor: 'rgb(255, 99, 132)',
+                            borderWidth: 3,
+                            borderDash: [6, 6],
+                            label: {
+                                display: true,
+                                content: '🎯 Hidden Bug Discovered',
+                                position: 'start',
+                                backgroundColor: 'rgba(255, 99, 132, 0.8)',
+                                color: 'white',
+                                font: { size: 14, weight: 'bold' }
+                            }
+                        }
+                    }
+                }
+            """, hiddenBugFirstEpisode, hiddenBugFirstEpisode);
+        }
+        
+        return String.format("""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hidden Bug Discovery - SARSA Agent</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation"></script>
+    <style>
+        body { 
+            font-family: 'Segoe UI', sans-serif; 
+            background: #0d1117; 
+            color: #e6edf3; 
+            padding: 40px;
+            margin: 0;
+        }
+        .container { max-width: 1000px; margin: 0 auto; }
+        h1 { text-align: center; color: #58a6ff; margin-bottom: 8px; font-size: 1.8em; }
+        .subtitle { text-align: center; color: #8b949e; margin-bottom: 30px; font-size: 0.95em; }
+        .chart-container { 
+            background: #161b22; 
+            border: 1px solid #30363d;
+            border-radius: 12px; 
+            padding: 25px;
+        }
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            margin-top: 25px;
+        }
+        .stat-box {
+            background: #161b22;
+            border: 1px solid #30363d;
+            padding: 15px 30px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-value { font-size: 2em; color: #58a6ff; font-weight: 600; }
+        .stat-label { color: #8b949e; margin-top: 4px; font-size: 0.85em; }
+        .highlight { border-color: #f85149; }
+        .highlight .stat-value { color: #f85149; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Hidden Bug Discovery</h1>
+        <p class="subtitle">SARSA agent discovers conditional 5-step bug chain</p>
+        
+        <div class="chart-container">
+            <canvas id="bugChart"></canvas>
+        </div>
+        
+        <div class="stats">
+            <div class="stat-box">
+                <div class="stat-value">%d</div>
+                <div class="stat-label">Total Unique Bugs</div>
+            </div>
+            <div class="stat-box highlight">
+                <div class="stat-value">%s</div>
+                <div class="stat-label">Discovery Episode</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">%d</div>
+                <div class="stat-label">Hidden Bug Hits</div>
+            </div>
+        </div>
+    </div>
 
+    <script>
+        const ctx = document.getElementById('bugChart').getContext('2d');
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: %s,
+                datasets: [{
+                    label: 'Hidden Bug Hits (per 1k episodes)',
+                    data: %s,
+                    borderColor: '#f85149',
+                    backgroundColor: 'rgba(248, 81, 73, 0.15)',
+                    fill: true,
+                    tension: 0,
+                    pointRadius: 2,
+                    pointBackgroundColor: '#f85149',
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                interaction: { intersect: false, mode: 'index' },
+                plugins: {
+                    legend: { display: false },
+                    title: {
+                        display: true,
+                        text: 'DELETE POINTS → 500 (when ancestor price < 0)',
+                        color: '#8b949e',
+                        font: { size: 13, weight: 'normal' }
+                    },
+                    %s
+                },
+                scales: {
+                    x: { 
+                        title: { display: true, text: 'Episode', color: '#8b949e' },
+                        grid: { color: 'rgba(48, 54, 61, 0.6)' },
+                        ticks: { color: '#8b949e' }
+                    },
+                    y: { 
+                        title: { display: true, text: 'Bug Hits', color: '#8b949e' },
+                        grid: { color: 'rgba(48, 54, 61, 0.6)' },
+                        ticks: { color: '#8b949e' },
+                        min: 0
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
+        """, 
+        uniqueBugCombos.size(),
+        hiddenBugFirstEpisode > 0 ? String.format("%,d", hiddenBugFirstEpisode) : "—",
+        hiddenBugCount,
+        episodes.toString(),
+        hiddenHits.toString(),
+        markerAnnotation
+        );
+    }
 
 
 }
