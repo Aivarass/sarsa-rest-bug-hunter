@@ -12,15 +12,28 @@ import java.util.*;
 
 public class SarsaRestTester {
 
-    private int EPISODES = 200_000;
+    private int EPISODES = 50_000;
     private int LOG_EVERY = 10_000;
     private int SEED = 1234;
     private int STEP_LIMIT = 35;
 
     //HYPER PARAMS
     private double EPSILON = 0.01;
-    static final double GAMMA = 1.0;
+    // GAMMA must stay < 1: STEP_LIMIT is a truncation, not a true terminal state, so
+    // the loop bootstraps through the cut. With GAMMA = 1.0 that continuing return is
+    // unbounded and the value function is ill-defined. 0.99^35 ~= 0.70, so credit still
+    // propagates comfortably across a 5-step dependency chain.
+    static final double GAMMA = 0.99;
     static final double ALPHA = 0.01;
+
+    //REWARDS
+    // Scaled so the largest single-step reward is 1.0. The ANN clips |TD error| at 10
+    // as a divergence safety net; at the old +10 bug reward that net truncated the
+    // signal on the very transitions we care about. Ratios between the three are
+    // unchanged from the original 10 / -0.15, so the induced ordering is the same.
+    static final double NOVEL_BUG_REWARD = 1.0;
+    static final double REPEAT_BUG_REWARD = 0.1;
+    static final double DIAL_STEP_COST = -0.015;
 
     //ANN
     private int ANN_INPUTS = State.FEATURE_COUNT;
@@ -56,6 +69,7 @@ public class SarsaRestTester {
     // Tracking - execute vs dial-turner ratio
     private static int executeCount = 0;
     private static int dialTurnerCount = 0;
+    private static int transportFailureCount = 0;
 
 
     TinyQNetwork ann;
@@ -87,8 +101,10 @@ public class SarsaRestTester {
                 System.out.println("\n" + "=".repeat(60));
                 System.out.printf("Episode %,d | Avg Reward: %.3f | Unique Bug Combos: %d | Time: %.1fs%n",
                         i, avgReward, uniqueBugCombos.size(), elapsed);
-                System.out.printf("Execute ratio: %.1f%% (%d executes, %d dial-turners)%n", 
+                System.out.printf("Execute ratio: %.1f%% (%d executes, %d dial-turners)%n",
                         executeRatio, executeCount, dialTurnerCount);
+                System.out.printf("Novel bugs this window: %.0f | Transport failures: %d%n",
+                        totalBugs, transportFailureCount);
                 
                 // HttpType distribution (GET, POST, PUT, etc.)
                 System.out.println("\n--- HttpType Distribution ---");
@@ -150,6 +166,7 @@ public class SarsaRestTester {
                 bugsByCombo.clear();
                 executeCount = 0;
                 dialTurnerCount = 0;
+                transportFailureCount = 0;
             }
         }
     }
@@ -161,75 +178,120 @@ public class SarsaRestTester {
         lastDiscountId = null;
         lastPointsId = null;
         State currentState = initState();
+        strategy.reset();
         boolean[] mask = getValidMask(currentState, strategy);
         int currentAction = ann.epsilonGreedyMasked(currentState.scale(), EPSILON, mask, rng);
-        
+
         double episodeReward = 0;
         int bugsFound = 0;
 
-        Response response = null;
-        strategy.reset();
-        
         for (int step = 0; step < STEP_LIMIT; step++) {
             allActionCounts.merge(currentAction, 1, Integer::sum);
 
+            // S_t: snapshot the features BEFORE anything mutates the State object.
+            // State is mutated in place and every helper returns the same instance,
+            // so without this snapshot s and s' would be the identical vector and the
+            // TD target would carry no information about what the action did.
+            double[] sFeat = currentState.scale();
+
+            // Per-step, NOT per-episode: a stale response would otherwise keep paying
+            // the bug reward and keep resetting the dials on every later step.
+            Response response = null;
             String executedCombo = null;
-            if(strategy.isExecute(currentAction)){
+            boolean wasExecute = strategy.isExecute(currentAction);
+
+            if (wasExecute) {
                 // Track strategy combo before executing
                 trackStrategyExecution(strategy);
-                executedCombo = String.format("%s+%s+%s+%s", 
+                executedCombo = String.format("%s+%s+%s+%s",
                         strategy.getHttpType(), strategy.getEndpoint(), strategy.getStrategy(), strategy.getField());
                 // Pass IDs to PayloadGenerator for PRICES/DISCOUNTS/POINTS endpoints
-                pbt.setLastItemId(lastItemId != null ? Long.parseLong(lastItemId) : null);
-                pbt.setLastPriceId(lastPriceId != null ? Long.parseLong(lastPriceId) : null);
-                pbt.setLastDiscountId(lastDiscountId != null ? Long.parseLong(lastDiscountId) : null);
+                pbt.setLastItemId(parseId(lastItemId));
+                pbt.setLastPriceId(parseId(lastPriceId));
+                pbt.setLastDiscountId(parseId(lastDiscountId));
                 response = executeWithStrategy(strategy);
                 executeCount++;
-            }else{
+            } else {
                 currentState = strategy.applyAction(currentAction, currentState);
                 currentState.setStepsSinceExecute(Math.min(currentState.getStepsSinceExecute() + 1, 10));
                 dialTurnerCount++;
             }
 
-            //NEXT
+            // Environment transition -> S_{t+1}
             State nextState = updateStateFromResponse(currentState, strategy, response);
-            boolean[] nextMask = getValidMask(nextState, strategy);
-            int nextAction = ann.epsilonGreedyMasked(nextState.scale(), EPSILON, nextMask, rng);
 
-            if(response != null) {
+            // R_{t+1} for this transition, scored while the dials are still intact.
+            RewardOutcome outcome = calculateReward(response, executedCombo, wasExecute);
+            episodeReward += outcome.reward;
+            if (outcome.novelBug) bugsFound++;
+
+            // Post-execute bookkeeping must happen BEFORE A_{t+1} is chosen, so that
+            // a' is drawn from the same s' that gets fed to the SARSA update and so
+            // that the action mask reflects the state the action will actually run in.
+            if (wasExecute) {
                 strategy.reset();
                 nextState.resetAfterExecute();
             }
 
-            double reward = calculateReward(response, executedCombo);
-            episodeReward += reward;
-            if (reward > 0) bugsFound++;  // Only count novel bugs
-            
-            boolean terminal = (step == STEP_LIMIT - 1);
-            ann.sarsaUpdate(currentState.scale(), currentAction, reward, nextState.scale(), nextAction, terminal, ALPHA, GAMMA);
-//            ann.qLearningUpdate(currentState.scale(), currentAction, reward, nextState.scale(), terminal, ALPHA, GAMMA);
+            boolean[] nextMask = getValidMask(nextState, strategy);
+            double[] sNextFeat = nextState.scale();
+            int nextAction = ann.epsilonGreedyMasked(sNextFeat, EPSILON, nextMask, rng);
+
+            // STEP_LIMIT is a truncation, not a true terminal state: nothing about the
+            // API makes step 34 an absorbing state, and the step index is not in the
+            // features. Zeroing the bootstrap here would bias every value estimate, so
+            // we bootstrap through the cut (partial-episode bootstrapping). This is only
+            // sound because GAMMA < 1 bounds the continuing return.
+            boolean terminal = false;
+            ann.sarsaUpdate(sFeat, currentAction, outcome.reward, sNextFeat, nextAction, terminal, ALPHA, GAMMA);
+//            ann.qLearningUpdate(sFeat, currentAction, outcome.reward, sNextFeat, terminal, ALPHA, GAMMA);
 
             currentState = nextState;
             currentAction = nextAction;
         }
-        
+
         return new double[]{episodeReward, bugsFound};
     }
 
-    private double calculateReward(Response response, String executedCombo){
-        if (response == null) {
-            return -0.15;
+    /** Reward for one transition, plus whether it was a first-time bug discovery. */
+    private record RewardOutcome(double reward, boolean novelBug) {}
+
+    private RewardOutcome calculateReward(Response response, String executedCombo, boolean wasExecute) {
+        if (!wasExecute) {
+            // Cost of turning a dial instead of firing a request.
+            return new RewardOutcome(DIAL_STEP_COST, false);
         }
-        if(response.getStatusCode() != 500){
-            return 0;
+        if (response == null) {
+            // Execute attempted but the request could not be completed (transport
+            // failure). Neutral: not a confirmed bug, but not a dial-turn either.
+            return new RewardOutcome(0, false);
+        }
+        if (response.getStatusCode() != 500) {
+            return new RewardOutcome(0, false);
         }
 
         // Track bug by strategy combo (captured before reset)
+        boolean novel = false;
         if (executedCombo != null) {
             bugsByCombo.merge(executedCombo, 1, Integer::sum);
-            uniqueBugCombos.add(executedCombo);
+            novel = uniqueBugCombos.add(executedCombo);
         }
-        return 10;
+        // Re-triggering an already-known combo pays far less, so the optimal policy is
+        // to broaden coverage rather than spam one known 500 for the rest of the run.
+        // NOTE: this makes the reward history-dependent, i.e. non-Markovian w.r.t. the
+        // feature vector, since the discovered-combo set is not part of the state. That
+        // is the usual trade-off for novelty bonuses in fuzzing; tune the two constants
+        // if you want a stricter MDP (set them equal) or stronger coverage pressure.
+        return new RewardOutcome(novel ? NOVEL_BUG_REWARD : REPEAT_BUG_REWARD, novel);
+    }
+
+    private static Long parseId(String id) {
+        if (id == null) return null;
+        try {
+            return Long.parseLong(id);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
     
     private void trackStrategyExecution(StrategyBuilder strategy) {
@@ -261,15 +323,31 @@ public class SarsaRestTester {
         // Use lowercase endpoint name for URL (items, prices)
         String endpointPath = endpoint.name().toLowerCase();
 
-        return switch (httpType) {
-            case POST -> postItem(payload, endpoint);
-            case PUT -> putItem(payload, endpoint);
-            case PATCH -> patchItem(payload, endpoint);
-            case DELETE -> RestAssured.delete(BASE_URL + endpointPath + "/" + lastId);
-            case GET -> RestAssured.get(BASE_URL + endpointPath + "/" + lastId);
-            case GET_ALL -> RestAssured.get(BASE_URL + endpointPath);
-            default -> null;
-        };
+        // The action mask should already prevent this, but a literal "/null" in the URL
+        // would silently pollute the bug statistics, so refuse it rather than send it.
+        if (httpTypeRequiresId(httpType) && lastId == null) {
+            return null;
+        }
+
+        try {
+            return switch (httpType) {
+                case POST -> postItem(payload, endpoint);
+                case PUT -> putItem(payload, endpoint);
+                case PATCH -> patchItem(payload, endpoint);
+                case DELETE -> RestAssured.delete(BASE_URL + endpointPath + "/" + lastId);
+                case GET -> RestAssured.get(BASE_URL + endpointPath + "/" + lastId);
+                case GET_ALL -> RestAssured.get(BASE_URL + endpointPath);
+                default -> null;
+            };
+        } catch (Exception e) {
+            // Transport-level failure (connection reset, timeout, server down). Scored
+            // as neutral rather than as a 500: a genuine crash and a flaky socket are
+            // indistinguishable here, and rewarding it would teach the agent to DoS
+            // the target instead of finding logic bugs. Without this catch a single
+            // dropped connection aborts the whole run.
+            transportFailureCount++;
+            return null;
+        }
     }
 
     private State updateStateFromResponse(State state, StrategyBuilder strategy, Response response) {
@@ -382,27 +460,43 @@ public class SarsaRestTester {
         boolean hasPointsId = state.getHasValidPointsId() == 1;
         Endpoint currentEndpoint = strategy.getEndpoint();
 
+        boolean hasIdForCurrentEndpoint;
+        if (currentEndpoint == Endpoint.ITEMS) {
+            hasIdForCurrentEndpoint = hasItemId;
+        } else if (currentEndpoint == Endpoint.PRICES) {
+            hasIdForCurrentEndpoint = hasPriceId;
+        } else if (currentEndpoint == Endpoint.DISCOUNTS) {
+            hasIdForCurrentEndpoint = hasDiscountId;
+        } else {
+            hasIdForCurrentEndpoint = hasPointsId;
+        }
+
         for (int i = 0; i < ANN_ACTIONS; i++) {
             if (StrategyBuilder.actionRequiresId(i)) {
                 // ID-dependent actions need the correct ID for the current endpoint
-                if (currentEndpoint == Endpoint.ITEMS) {
-                    mask[i] = hasItemId;
-                } else if (currentEndpoint == Endpoint.PRICES) {
-                    mask[i] = hasPriceId;
-                } else if (currentEndpoint == Endpoint.DISCOUNTS) {
-                    mask[i] = hasDiscountId;
-                } else {
-                    mask[i] = hasPointsId;
-                }
+                mask[i] = hasIdForCurrentEndpoint;
             }
             else if (i == StrategyBuilder.getExecuteIndex()) {
-                mask[i] = strategy.isReady();
+                // Gating the EXPLORE_* dials alone is not enough: INSPECT_* is never
+                // masked, so the agent can dial a method that needs an ID and then
+                // switch to an endpoint that has none, producing DELETE /prices/null.
+                // EXECUTE therefore has to re-check the pairing at fire time.
+                mask[i] = strategy.isReady()
+                        && (!httpTypeRequiresId(strategy.getHttpType()) || hasIdForCurrentEndpoint);
             }
             else {
                 mask[i] = true;
             }
         }
         return mask;
+    }
+
+    /** HTTP methods that address a single resource and therefore need a known ID. */
+    private static boolean httpTypeRequiresId(HttpType httpType) {
+        return httpType == HttpType.GET
+                || httpType == HttpType.PUT
+                || httpType == HttpType.PATCH
+                || httpType == HttpType.DELETE;
     }
 
     // Helper methods

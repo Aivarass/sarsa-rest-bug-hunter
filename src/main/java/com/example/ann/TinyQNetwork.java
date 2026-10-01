@@ -33,11 +33,23 @@ public class TinyQNetwork {
     private final double[][] wHiddenQ;      // [A][H]
     private final double[] bQ;              // [A]
 
-    // Scratch buffers (avoid allocations)
+    // Scratch buffers (avoid allocations).
+    // NOTE: these make the class NOT thread-safe and NOT reentrant. Any call that
+    // runs a forward pass invalidates them for the previous input.
     private final double[] hidden;          // [H]
     private final double[] qValues;         // [A]
 
     private final Random rng;
+
+    /**
+     * Bound on |TD error| applied inside {@link #applySemiGradient}.
+     *
+     * This is a divergence safety net, NOT a normalizer: it must stay comfortably
+     * above the largest single-step reward magnitude, otherwise it silently
+     * truncates legitimate learning signal on exactly the rare high-value
+     * transitions the agent is trying to learn about.
+     */
+    private double errorClip = 10.0;
 
     // ========================== Constructors ==========================
 
@@ -76,7 +88,11 @@ public class TinyQNetwork {
             for (int d = 0; d < inputDim; d++) {
                 wInputHidden[h][d] = uniform(-limitIH, limitIH);
             }
-            bHidden[h] = 0.0;
+            // Small non-zero hidden bias breaks a degenerate case: with bHidden=0 an
+            // all-zero input gives hidden=tanh(0)=0, so Q[a]=bQ[a]=0 for EVERY action
+            // and the greedy policy is a total tie. Episodes here always start from
+            // the all-zero state, so that tie would otherwise be hit every episode.
+            bHidden[h] = uniform(-limitIH, limitIH);
         }
 
         // Q-head: linear output
@@ -118,9 +134,18 @@ public class TinyQNetwork {
      */
     public int argmax(double[] state) {
         forward(state);
+        // Uniform reservoir sampling among maximizers, so exact ties do not
+        // collapse to the lowest action index.
         int best = 0;
+        int ties = 1;
         for (int a = 1; a < actionCount; a++) {
-            if (qValues[a] > qValues[best]) best = a;
+            if (qValues[a] > qValues[best]) {
+                best = a;
+                ties = 1;
+            } else if (qValues[a] == qValues[best]) {
+                ties++;
+                if (rng.nextInt(ties) == 0) best = a;
+            }
         }
         return best;
     }
@@ -158,19 +183,17 @@ public class TinyQNetwork {
         forwardHidden(state);
 
         // Optionally clip error for stability
-        double errClip = clip(error, -10.0, 10.0);
+        double errClip = clip(error, -errorClip, errorClip);
         double step = alpha * errClip;
 
-        // --- Update Q-head weights for the chosen action ---
-        // Q[a] = Wq[a] · hidden + bq[a]
-        // ∂Q[a]/∂Wq[a][h] = hidden[h]
-        // ∂Q[a]/∂bq[a] = 1
-        for (int h = 0; h < hiddenUnits; h++) {
-            wHiddenQ[action][h] += step * hidden[h];
-        }
-        bQ[action] += step;
+        // IMPORTANT: every partial derivative in ∇_w Q(s,a) must be evaluated at the
+        // SAME parameter vector w_t. So the trunk is updated FIRST, while
+        // wHiddenQ[action] still holds its pre-update values. Updating the Q-head
+        // first and then reading it back as ∂Q/∂hidden injects a spurious
+        // α²·error²·hidden[h]·(1-hidden[h]²)·state[d] term that never cancels
+        // (error² is always positive) and can invert the trunk gradient's sign.
 
-        // --- Backprop into trunk ---
+        // --- Backprop into trunk (uses pre-update Q-head weights) ---
         // ∂Q[a]/∂hidden[h] = Wq[a][h]
         // ∂hidden[h]/∂z[h] = 1 - hidden[h]^2 (tanh derivative)
         for (int h = 0; h < hiddenUnits; h++) {
@@ -183,6 +206,17 @@ public class TinyQNetwork {
             }
             bHidden[h] += chain;
         }
+
+        // --- Update Q-head weights for the chosen action ---
+        // hidden[] is deliberately NOT recomputed: ∂Q[a]/∂Wq[a][h] = hidden[h] must
+        // also be the pre-update activation, which is exactly what the buffer holds.
+        // Q[a] = Wq[a] · hidden + bq[a]
+        // ∂Q[a]/∂Wq[a][h] = hidden[h]
+        // ∂Q[a]/∂bq[a] = 1
+        for (int h = 0; h < hiddenUnits; h++) {
+            wHiddenQ[action][h] += step * hidden[h];
+        }
+        bQ[action] += step;
     }
 
     /**
@@ -267,15 +301,29 @@ public class TinyQNetwork {
             }
         }
 
-        // Greedy among valid
+        // Greedy among valid, with uniform tie-breaking among maximizers.
         forward(state);
         int best = -1;
+        int ties = 0;
         double bestQ = Double.NEGATIVE_INFINITY;
         for (int a = 0; a < actionCount; a++) {
-            if (validMask[a] && qValues[a] > bestQ) {
-                bestQ = qValues[a];
+            if (!validMask[a]) continue;
+            double v = qValues[a];
+            if (v > bestQ) {
+                bestQ = v;
                 best = a;
+                ties = 1;
+            } else if (v == bestQ) {
+                ties++;
+                if (rng.nextInt(ties) == 0) best = a;
             }
+        }
+        if (best < 0) {
+            // Only reachable if every valid Q is NaN, i.e. the net has diverged.
+            // Fail loudly here rather than returning -1 into the caller's action space.
+            throw new IllegalStateException(
+                    "No greedy action selectable: Q-values are not comparable (NaN?). "
+                            + "The network has likely diverged.");
         }
         return best;
     }
@@ -290,6 +338,10 @@ public class TinyQNetwork {
     }
 
     private void forwardHidden(double[] x) {
+        if (x.length != inputDim) {
+            throw new IllegalArgumentException(
+                    "State feature length " + x.length + " != inputDim " + inputDim);
+        }
         for (int h = 0; h < hiddenUnits; h++) {
             double z = bHidden[h];
             for (int d = 0; d < inputDim; d++) {
@@ -316,5 +368,18 @@ public class TinyQNetwork {
     public int getInputDim() { return inputDim; }
     public int getHiddenUnits() { return hiddenUnits; }
     public int getActionCount() { return actionCount; }
+
+    public double getErrorClip() { return errorClip; }
+
+    /**
+     * Sets the |TD error| safety bound. Keep it well above the largest single-step
+     * reward so it does not routinely truncate real signal.
+     */
+    public void setErrorClip(double errorClip) {
+        if (!(errorClip > 0)) {
+            throw new IllegalArgumentException("errorClip must be > 0");
+        }
+        this.errorClip = errorClip;
+    }
 }
 
