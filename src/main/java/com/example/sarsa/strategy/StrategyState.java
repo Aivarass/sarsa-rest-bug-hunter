@@ -14,12 +14,18 @@ public class StrategyState {
     private Strategy strategy = Strategy.VALID;
     private Intensity intensity = Intensity.MILD;
 
+    /** Full reset. For starting a new episode only - NOT after an execute. */
     public void reset() {
         this.httpType = HttpType.NONE;
         this.endpoint = Endpoint.ITEMS;
         this.field = Field.ALL;
         this.strategy = Strategy.VALID;
         this.intensity = Intensity.MILD;
+    }
+
+    /** Post-execute reset: method only. Mirror of State.resetMethodOnly(). */
+    public void resetMethodOnly() {
+        this.httpType = HttpType.NONE;
     }
 
 

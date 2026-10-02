@@ -48,6 +48,9 @@ public class DiscountController {
         if (discount.getDiscount() < 0) {
             return ResponseEntity.internalServerError().body(null);
         }
+        // Link the STORED price, not the client's {"id":N} stub, so the real price
+        // value propagates down the chain.
+        discount.setPrice(PriceController.prices.get(discount.getPrice().getId()));
         Long id = idCounter.getAndIncrement();
         discount.setId(id);
         discounts.put(id, discount);

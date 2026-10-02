@@ -33,22 +33,13 @@ public class TinyQNetwork {
     private final double[][] wHiddenQ;      // [A][H]
     private final double[] bQ;              // [A]
 
-    // Scratch buffers (avoid allocations).
-    // NOTE: these make the class NOT thread-safe and NOT reentrant. Any call that
-    // runs a forward pass invalidates them for the previous input.
+    // Scratch buffers. NOT thread-safe, NOT reentrant.
     private final double[] hidden;          // [H]
     private final double[] qValues;         // [A]
 
     private final Random rng;
 
-    /**
-     * Bound on |TD error| applied inside {@link #applySemiGradient}.
-     *
-     * This is a divergence safety net, NOT a normalizer: it must stay comfortably
-     * above the largest single-step reward magnitude, otherwise it silently
-     * truncates legitimate learning signal on exactly the rare high-value
-     * transitions the agent is trying to learn about.
-     */
+    /** |TD error| bound. Keep above the largest single-step reward. */
     private double errorClip = 10.0;
 
     // ========================== Constructors ==========================
@@ -88,10 +79,8 @@ public class TinyQNetwork {
             for (int d = 0; d < inputDim; d++) {
                 wInputHidden[h][d] = uniform(-limitIH, limitIH);
             }
-            // Small non-zero hidden bias breaks a degenerate case: with bHidden=0 an
-            // all-zero input gives hidden=tanh(0)=0, so Q[a]=bQ[a]=0 for EVERY action
-            // and the greedy policy is a total tie. Episodes here always start from
-            // the all-zero state, so that tie would otherwise be hit every episode.
+            // Non-zero: with bHidden=0 an all-zero input makes Q identical for every
+            // action, and episodes always start from the all-zero state.
             bHidden[h] = uniform(-limitIH, limitIH);
         }
 
@@ -186,12 +175,8 @@ public class TinyQNetwork {
         double errClip = clip(error, -errorClip, errorClip);
         double step = alpha * errClip;
 
-        // IMPORTANT: every partial derivative in ∇_w Q(s,a) must be evaluated at the
-        // SAME parameter vector w_t. So the trunk is updated FIRST, while
-        // wHiddenQ[action] still holds its pre-update values. Updating the Q-head
-        // first and then reading it back as ∂Q/∂hidden injects a spurious
-        // α²·error²·hidden[h]·(1-hidden[h]²)·state[d] term that never cancels
-        // (error² is always positive) and can invert the trunk gradient's sign.
+        // Trunk FIRST: every term of grad Q must use the same w_t. Updating the head
+        // first and reading it back as dQ/dhidden injects a spurious alpha^2*err^2 term.
 
         // --- Backprop into trunk (uses pre-update Q-head weights) ---
         // ∂Q[a]/∂hidden[h] = Wq[a][h]
@@ -208,8 +193,7 @@ public class TinyQNetwork {
         }
 
         // --- Update Q-head weights for the chosen action ---
-        // hidden[] is deliberately NOT recomputed: ∂Q[a]/∂Wq[a][h] = hidden[h] must
-        // also be the pre-update activation, which is exactly what the buffer holds.
+        // hidden[] deliberately NOT recomputed: it must be the pre-update activation.
         // Q[a] = Wq[a] · hidden + bq[a]
         // ∂Q[a]/∂Wq[a][h] = hidden[h]
         // ∂Q[a]/∂bq[a] = 1
@@ -371,10 +355,6 @@ public class TinyQNetwork {
 
     public double getErrorClip() { return errorClip; }
 
-    /**
-     * Sets the |TD error| safety bound. Keep it well above the largest single-step
-     * reward so it does not routinely truncate real signal.
-     */
     public void setErrorClip(double errorClip) {
         if (!(errorClip > 0)) {
             throw new IllegalArgumentException("errorClip must be > 0");

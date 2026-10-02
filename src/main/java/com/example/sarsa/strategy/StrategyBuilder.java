@@ -88,6 +88,13 @@ public class StrategyBuilder {
     }
 
     /**
+     * Reset after an execute: clears the method only, keeping the dials.
+     */
+    public void resetMethodOnly() {
+        strategy.resetMethodOnly();
+    }
+
+    /**
      * Get action count (for ANN_ACTIONS).
      */
     public static int getActionCount() {

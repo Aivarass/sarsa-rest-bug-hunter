@@ -28,7 +28,10 @@ public class State {
 
     private int isReadyToExecute;
 
-    public static final int FEATURE_COUNT = 14;
+    /** Remaining step budget in [0,1]. Makes the episode cut observable. */
+    private double stepsRemainingFrac;
+
+    public static final int FEATURE_COUNT = 15;
 
     /**
      * Scales and normalizes state into double[] for neural network input.
@@ -58,6 +61,7 @@ public class State {
         features[11] = currentIntensity / 2.0;   // 3 intensities (0-2)
         features[12] = Math.min(stepsSinceExecute, 10) / 10.0;  // Capped at 10
         features[13] = isReadyToExecute;        // Binary 0 or 1
+        features[14] = stepsRemainingFrac;      // Time-awareness, already in [0, 1]
 
 
         return features;
@@ -79,12 +83,12 @@ public class State {
         };
     }
 
-    public void resetAfterExecute() {
+    /**
+     * Post-execute reset: method only. The dial features persist and MUST stay in
+     * lock-step with StrategyState.resetMethodOnly().
+     */
+    public void resetMethodOnly() {
         this.httpType = 0;    // NONE
-        this.endpoint = 0;
-        this.currentField = 0;       // NONE
-        this.currentStrategy = 0;    // NONE
-        this.currentIntensity = 0;   // MILD
         this.stepsSinceExecute = 0;
         this.isReadyToExecute = 0;
     }
