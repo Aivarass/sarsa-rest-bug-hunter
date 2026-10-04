@@ -1,6 +1,7 @@
 package com.example.sarsa;
 
 import com.example.ann.TinyQNetwork;
+import com.example.harness.HttpResult;
 import com.example.sarsa.generator.PayloadGenerator;
 import com.example.sarsa.model.State;
 import com.example.sarsa.strategy.Action;
@@ -27,7 +28,17 @@ public class SarsaSelfCheck {
     private static int failed = 0;
 
     public static void main(String[] args) throws Exception {
+        // This suite drives real episodes, so it sends real HTTP. Point it at a port
+        // nothing listens on unless the caller says otherwise: the default base URL is
+        // localhost:8080, and firing a few hundred requests into whatever happens to be
+        // running there corrupts that service's state and any trial measuring it.
+        // Must happen before SarsaRestTester is loaded - BASE_URL is a static final.
+        if (System.getProperty("sarsa.baseUrl") == null) {
+            System.setProperty("sarsa.baseUrl", "http://localhost:1/api/");
+        }
         System.out.println("SARSA / ANN invariant suite");
+        System.out.println("target: " + System.getProperty("sarsa.baseUrl")
+                + "  (shaping invariance needs a service that does NOT answer)");
         System.out.println("=".repeat(64));
 
         annInputDimMatchesFeatureCount();
@@ -53,6 +64,9 @@ public class SarsaSelfCheck {
 
         System.out.println("=".repeat(64));
         System.out.printf("%d passed, %d failed%n", passed, failed);
+        System.out.printf("HTTP requests emitted by this suite: %,d -> %s%n",
+                com.example.harness.HttpTransport.jvmRequests(),
+                System.getProperty("sarsa.baseUrl"));
         if (failed > 0) System.exit(1);
     }
 
@@ -255,10 +269,10 @@ public class SarsaSelfCheck {
         s.applyAction(Action.EXPLORE_DELETE.ordinal(), st);
         s.applyAction(Action.INSPECT_POINTS.ordinal(), st);
 
-        SarsaRestTester.HttpResult guard = new SarsaRestTester.HttpResult(500, "");
-        SarsaRestTester.HttpResult d1 = new SarsaRestTester.HttpResult(
+        HttpResult guard = new HttpResult(500, "");
+        HttpResult d1 = new HttpResult(
                 500, "{\"exception\":\"java.lang.IllegalStateException\"}");
-        SarsaRestTester.HttpResult d2 = new SarsaRestTester.HttpResult(
+        HttpResult d2 = new HttpResult(
                 500, "{\"exception\":\"java.lang.ArithmeticException\"}");
 
         String kg = t.bugPathKey(s, guard), k1 = t.bugPathKey(s, d1), k2 = t.bugPathKey(s, d2);
@@ -277,7 +291,7 @@ public class SarsaSelfCheck {
     private static void shapeBonusPaysOnceAndIsPure() {
         SarsaRestTester t = new SarsaRestTester();
         t.resetRunState();
-        SarsaRestTester.HttpResult ok = new SarsaRestTester.HttpResult(200, "{}");
+        HttpResult ok = new HttpResult(200, "{}");
         String shape = "POST+ITEMS+VALID+ALL";
 
         double first = t.shapeBonus(ok, shape, true);
@@ -294,7 +308,7 @@ public class SarsaSelfCheck {
 
     private static void scoreTransitionIsPure() {
         SarsaRestTester t = new SarsaRestTester();
-        SarsaRestTester.HttpResult bug = new SarsaRestTester.HttpResult(500, "{}");
+        HttpResult bug = new HttpResult(500, "{}");
         String combo = "POST+ITEMS+NEGATIVE+ALL";
 
         SarsaRestTester.RewardOutcome a = t.scoreTransition(bug, combo, true);
@@ -303,9 +317,9 @@ public class SarsaSelfCheck {
                 a.reward() == b.reward() && a.novelBug() == b.novelBug(),
                 "first=" + a.reward() + " second=" + b.reward());
 
-        boolean empty = t.seenPaths.isEmpty();
+        boolean empty = t.seenPaths().isEmpty();
         check("scoreTransition does not mutate novelty memory", empty,
-                "seen=" + t.seenPaths);
+                "seen=" + t.seenPaths());
     }
 
     /**
@@ -316,11 +330,11 @@ public class SarsaSelfCheck {
      */
     private static void repeatingAKnownPathEarnsNothing() {
         SarsaRestTester t = new SarsaRestTester();
-        SarsaRestTester.HttpResult bug = new SarsaRestTester.HttpResult(500, "");
+        HttpResult bug = new HttpResult(500, "");
         String path = "POST+ITEMS+NEGATIVE+ALL";
 
         double first = t.scoreTransition(bug, path, true).reward();
-        t.seenPaths.add(path);
+        t.seenPaths().add(path);
         double second = t.scoreTransition(bug, path, true).reward();
 
         check("First hit on a path pays NOVEL", first == SarsaRestTester.NOVEL_BUG_REWARD,
@@ -362,10 +376,10 @@ public class SarsaSelfCheck {
     /** GUARD (empty body) and CRASH:<class> must be separable. */
     private static void errorKindSeparatesGuardFromCrash() {
         SarsaRestTester t = new SarsaRestTester();
-        String guard = t.errorKind(new SarsaRestTester.HttpResult(500, ""));
-        String npe = t.errorKind(new SarsaRestTester.HttpResult(500,
+        String guard = t.errorKind(new HttpResult(500, ""));
+        String npe = t.errorKind(new HttpResult(500,
                 "{\"status\":500,\"exception\":\"java.lang.NullPointerException\",\"path\":\"/api/items\"}"));
-        String unknown = t.errorKind(new SarsaRestTester.HttpResult(500,
+        String unknown = t.errorKind(new HttpResult(500,
                 "{\"status\":500,\"error\":\"Internal Server Error\"}"));
         check("errorKind: empty body -> GUARD", guard.equals("GUARD"), guard);
         check("errorKind: exception -> CRASH:<class>", npe.equals("CRASH:NullPointerException"), npe);
@@ -390,10 +404,10 @@ public class SarsaSelfCheck {
             t.resetRunState();
             Random rng = new Random(3);
             for (int e = 0; e < 25; e++) {
-                int seenBefore = t.seenPaths.size();
+                int seenBefore = t.seenPaths().size();
                 int from = spy.rewards.size();
                 double[] res = t.executeEpisode(rng);
-                boolean cleanEpisode = res[2] == 0.0 && t.seenPaths.size() == seenBefore;
+                boolean cleanEpisode = res[2] == 0.0 && t.seenPaths().size() == seenBefore;
                 if (!cleanEpisode) continue;
                 double disc = 0;
                 for (int i = from; i < spy.rewards.size(); i++) {
