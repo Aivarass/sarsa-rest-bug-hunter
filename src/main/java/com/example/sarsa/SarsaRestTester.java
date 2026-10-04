@@ -17,14 +17,46 @@ import java.util.*;
 
 public class SarsaRestTester {
 
-    int EPISODES = 50_000;
-    private int LOG_EVERY = 10_000;
+    int EPISODES = 3_125;          // 3,125 x 560 = 1.75M steps
+    private int LOG_EVERY = 625;   // log + novelty window; ~5 server resets per run
+    /**
+     * Server-reset cadence in episodes, decoupled from LOG_EVERY.
+     *
+     * LOG_EVERY drives logging AND the novelty window; the server reset was bolted onto
+     * the same counter for convenience. That conflates a REWARD parameter with an
+     * ENVIRONMENT parameter, so sweeping reset cadence would silently scale the novelty
+     * budget with it. <= 0 means "follow LOG_EVERY", preserving existing behaviour.
+     */
+    private int RESET_EVERY = Integer.parseInt(System.getProperty("sarsa.resetEvery", "0"));
     private int SEED = 1234;
-    int STEP_LIMIT = 35;              // package-private: read by SarsaSelfCheck
+    int STEP_LIMIT = 560;             // package-private: read by SarsaSelfCheck
 
     //HYPER PARAMS
     double EPSILON = 0.3;            // package-private: set by SarsaSelfCheck
-    static final double GAMMA = 0.99;
+    /**
+     * n for n-step SARSA (Sutton & Barto 7.2). 1 reproduces one-step SARSA exactly.
+     *
+     * One-step TD moves credit one action backward per reward event. Defect 2 pays at
+     * most once per window - five times in a 50k run - while the gap from the
+     * PATCH /discounts that arms it to the DELETE that fires is about nine actions, so
+     * the value signal could never reach the action that needs reinforcing. An n-step
+     * return assigns a properly gamma-discounted return to the state-action exactly n
+     * steps back, which reaches the whole chain from a single success. Unlike
+     * accumulating eligibility traces it does not smear credit across everything
+     * recently visited - distance is still discounted by gamma^k.
+     *
+     * Overridable so arms can run in parallel; default 1 keeps shipped behaviour.
+     */
+    static final int N_STEP = Integer.parseInt(System.getProperty("sarsa.nStep", "1"));
+
+    /**
+     * Discount factor, overridable. Two effects are bundled in this one knob and must be
+     * reported together: the effective horizon is 1/(1-GAMMA) steps (100 / 200 / 1000 for
+     * 0.99 / 0.995 / 0.999), and GAMMA also sets where the dial-penalty shaping inverts,
+     * at GAMMA/(1-GAMMA) dial-turns. Raising it lengthens the horizon AND pushes the
+     * inversion out of reach, so invsteps must be checked per arm to attribute the cause.
+     */
+    static final double GAMMA = Double.parseDouble(System.getProperty("sarsa.gamma", "0.99"));
     /** Overridable so alpha arms can run in parallel against separate API JVMs. */
     static final double ALPHA = Double.parseDouble(System.getProperty("sarsa.alpha", "0.01"));
 
@@ -32,10 +64,43 @@ public class SarsaRestTester {
     static final double NOVEL_BUG_REWARD = 1.0;
 
     static final double REPEAT_BUG_REWARD = 0.0;
-    /** Potential-based shaping weight: Phi(s) = -BETA * dialsSinceExecute. */
-    static final double BETA = 0.015;
+    /**
+     * Potential-based shaping weight: Phi(s) = -BETA * dialsSinceExecute.
+     * Overridable so it can be ablated to 0 - n-step returns dissolve this per-step
+     * nudge, so isolating credit propagation requires switching it off.
+     */
+    static final double BETA = Double.parseDouble(System.getProperty("sarsa.beta", "0.015"));
 
-    static final double EXPLORE_BONUS = 0.1;
+    /**
+     * DIAGNOSTIC: a second potential rewarding one specific action - a successful
+     * PATCH to /discounts carrying STRATEGY_NEGATIVE, the step that arms Defect 2.
+     *
+     * This is deliberate defect-specific hardcoding, in the same category as reading
+     * value signs off responses: an instrument for asking "can the agent be made to
+     * perform this action at all?", never a shippable configuration and never support
+     * for a no-domain-knowledge claim.
+     *
+     * Expressed as a potential rather than a raw bonus because a raw per-occurrence
+     * reward would simply be farmed - a 0.01 repeat reward once routed 98.8% of task
+     * reward to repeats. Phi_arm telescopes to ~0 across an episode, so it cannot be
+     * farmed and provably cannot change which policy is optimal; it only guides.
+     * 0 disables it.
+     */
+    static final double ARM_BONUS = Double.parseDouble(System.getProperty("sarsa.armBonus", "0.0"));
+
+    /**
+     * How many chain-depth samples to take per run, spread uniformly over the episodes.
+     *
+     * A fixed COUNT rather than a fixed interval, so arms with different episode counts
+     * (matched on total steps instead) remain directly comparable. Sampling uniformly
+     * rather than at window boundaries matters: accumulation peaks just before a reset,
+     * so boundary sampling would overestimate how much of the run the chain is armed.
+     */
+    static final int CHAIN_SAMPLES_PER_RUN =
+            Integer.parseInt(System.getProperty("sarsa.chainSamples", "100"));
+
+    static final double EXPLORE_BONUS =
+            Double.parseDouble(System.getProperty("sarsa.exploreBonus", "0.1"));
 
     //ANN
     private int ANN_INPUTS = State.FEATURE_COUNT;
@@ -54,12 +119,23 @@ public class SarsaRestTester {
             .build();
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /**
+     * Skip the socket and call the real controllers in-process. Same Spring context,
+     * same beans, same ObjectMapper, same JSON round-trip - only the transport differs.
+     * Verified bit-identical to HTTP mode on fixed seeds.
+     */
+    private static final boolean IN_PROCESS =
+            Boolean.parseBoolean(System.getProperty("sarsa.inProcess", "false"));
+    private InProcessApi inProcess;
+
     //HELPERS
     PayloadGenerator pbt;
     private String lastItemId;
     private String lastPriceId;
     private String lastDiscountId;
     private String lastPointsId;
+    /** Diagnostic (ARM_BONUS): has PATCH+DISCOUNTS+NEGATIVE succeeded this episode? */
+    private boolean armActionDone;
 
     // Tracking - raw actions
     private final LinkedHashMap<Integer, Integer> allActionCounts = new LinkedHashMap<>();
@@ -142,11 +218,31 @@ public class SarsaRestTester {
     private int serverResets = 0;
     // Chain-depth diagnostics (measurement only; see sampleChainDepth).
     private int maxD1Armed = 0, maxD2Armed = 0, windowsD1Armed = 0, windowsD2Armed = 0, chainSamples = 0;
+    private int chainSampleEvery = 0;
+    /**
+     * Largest dialsSinceExecute seen in the run, and how often the dial-penalty shaping
+     * inverted. Phi(s) = -BETA*k gives F = BETA*(k*(1-GAMMA) - GAMMA), which turns
+     * POSITIVE for k > GAMMA/(1-GAMMA) = 99 at GAMMA=0.99 - i.e. the term starts
+     * rewarding the dawdling it exists to prevent. Structurally unreachable at
+     * STEP_LIMIT=35; reachable once episodes are hundreds of steps long.
+     */
+    private int maxDialsSinceExecute = 0;
+    private long shapingInvertedSteps = 0;
     private long totalSteps = 0;
     private long totalExecutes = 0;
     private long totalBugFires = 0;
     /** Run-lifetime novel-path count; seenPaths is window-scoped and cannot serve this. */
     private long totalNovelPaths = 0;
+
+    /**
+     * Per-episode traces for SarsaSelfCheck. Recorded in the tester rather than by
+     * subclassing the network, because these are properties of the reward function and
+     * the state sequence - they must stay observable whatever the update rule is. With
+     * n-step returns the per-step rewards never reach the network at all.
+     */
+    final List<Double> lastEpisodeRewards = new ArrayList<>();
+    final List<double[]> lastEpisodeTimePairs = new ArrayList<>();
+    int lastEpisodeUpdates = 0;
     private long runStartMillis = 0;
 
     TinyQNetwork ann;
@@ -192,11 +288,14 @@ public class SarsaRestTester {
         windowsD1Armed = 0;
         windowsD2Armed = 0;
         chainSamples = 0;
+        maxDialsSinceExecute = 0;
+        shapingInvertedSteps = 0;
         runStartMillis = System.currentTimeMillis();
     }
 
     private void executeSarsa(int episodes) {
         resetRunState();
+        chainSampleEvery = Math.max(1, episodes / Math.max(1, CHAIN_SAMPLES_PER_RUN));
         Random rng = new Random(SEED);
         double totalReward = 0;
         double totalBaseReward = 0;
@@ -208,8 +307,9 @@ public class SarsaRestTester {
             // unbounded store makes late episodes arbitrarily slow; and unbounded
             // accumulation lets chain assembly amortise across the entire run, which
             // quietly changes the task the agent is being measured on.
+            int resetEvery = RESET_EVERY > 0 ? RESET_EVERY : LOG_EVERY;
+            if ((i - 1) % resetEvery == 0) resetServerState();
             if ((i - 1) % LOG_EVERY == 0) {
-                resetServerState();
                 // Bug novelty is scoped to the window, because the world it refers to was
                 // just cleared. Without this, 223 of 232 paths are found in window 1 and
                 // task reward is measured at exactly 0.0000 for the final 10k episodes -
@@ -224,6 +324,8 @@ public class SarsaRestTester {
             totalReward += result[0];
             totalBugs += result[1];
             totalBaseReward += result[2];
+
+            if (chainSampleEvery > 0 && i % chainSampleEvery == 0) sampleChainDepth();
 
             if (i % LOG_EVERY == 0) {
                 double avgReward = totalReward / LOG_EVERY;
@@ -327,10 +429,21 @@ public class SarsaRestTester {
         lastPriceId = null;
         lastDiscountId = null;
         lastPointsId = null;
+        armActionDone = false;
         State currentState = initState();
         strategy.reset();
         boolean[] mask = getValidMask(strategy);
         int currentAction = ann.epsilonGreedyMasked(currentState.scale(), EPSILON, mask, rng);
+
+        // n-step buffers, indexed by step t: the state and action taken at t and the
+        // reward that followed. STEP_LIMIT is small, so index directly - no ring buffer.
+        double[][] sBuf = new double[STEP_LIMIT][];
+        int[] aBuf = new int[STEP_LIMIT];
+        double[] rBuf = new double[STEP_LIMIT];
+        final double gammaPowN = Math.pow(GAMMA, N_STEP);
+        lastEpisodeRewards.clear();
+        lastEpisodeTimePairs.clear();
+        lastEpisodeUpdates = 0;
 
         double episodeReward = 0;
         double episodeBaseReward = 0;
@@ -347,6 +460,7 @@ public class SarsaRestTester {
             double[] sFeat = currentState.scale();
             int kBefore = dialsSinceExecute;
 
+            boolean armBefore = armActionDone;   // must be read BEFORE the execute
             HttpResult response = null;
             String requestShape = null;
             String executedPath = null;
@@ -367,6 +481,8 @@ public class SarsaRestTester {
             } else {
                 currentState = strategy.applyAction(currentAction, currentState);
                 dialsSinceExecute++;
+                if (dialsSinceExecute > maxDialsSinceExecute) maxDialsSinceExecute = dialsSinceExecute;
+                if (BETA > 0 && dialsSinceExecute > GAMMA / (1 - GAMMA)) shapingInvertedSteps++;
                 currentState.setStepsSinceExecute(Math.min(dialsSinceExecute, 10));
                 dialTurnerCount++;
             }
@@ -398,8 +514,11 @@ public class SarsaRestTester {
             int nextAction = ann.epsilonGreedyMasked(sNextFeat, EPSILON, nextMask, rng);
 
             // F = GAMMA*Phi(s') - Phi(s). Phi(terminal) must be 0 or the telescope leaks.
-            double phiBefore = -BETA * kBefore;
-            double phiAfter = terminal ? 0.0 : -BETA * dialsSinceExecute;
+            // Two potentials simply add; the sum is still a potential, so shaping stays
+            // policy-invariant and shapingIsPolicyInvariant still validates the wiring.
+            double phiBefore = -BETA * kBefore + ARM_BONUS * (armBefore ? 1 : 0);
+            double phiAfter = terminal ? 0.0
+                    : -BETA * dialsSinceExecute + ARM_BONUS * (armActionDone ? 1 : 0);
             double shaping = GAMMA * phiAfter - phiBefore;
 
             // episodeBaseReward stays bug-only so "Avg Task Reward" remains comparable
@@ -408,11 +527,37 @@ public class SarsaRestTester {
             episodeReward += reward;
             episodeBaseReward += outcome.reward;
 
-            ann.sarsaUpdate(sFeat, currentAction, reward, sNextFeat, nextAction, terminal, ALPHA, GAMMA);
-//            ann.qLearningUpdate(sFeat, currentAction, reward, sNextFeat, terminal, ALPHA, GAMMA);
+            lastEpisodeRewards.add(reward);
+            lastEpisodeTimePairs.add(new double[]{sFeat[State.FEATURE_COUNT - 1],
+                                                 sNextFeat[State.FEATURE_COUNT - 1]});
+
+            sBuf[step] = sFeat;
+            aBuf[step] = currentAction;
+            rBuf[step] = reward;
+
+            // tau = t - n + 1 becomes updatable once n rewards are in hand.
+            // G = sum_{k=0..n-1} gamma^k R[tau+k], bootstrapped with gamma^n Q(S_{tau+n}, A_{tau+n}).
+            int tau = step - N_STEP + 1;
+            if (tau >= 0) {
+                double g = 0;
+                for (int k = N_STEP - 1; k >= 0; k--) g = rBuf[tau + k] + GAMMA * g;
+                if (!terminal) g += gammaPowN * ann.predict(sNextFeat, nextAction);
+                ann.updateToward(sBuf[tau], aBuf[tau], g, ALPHA);
+                lastEpisodeUpdates++;
+            }
 
             currentState = nextState;
             currentAction = nextAction;
+        }
+
+        // Flush the tail: the last n-1 state-actions have no n-step horizon left, so
+        // they take truncated returns with no bootstrap (S&B: tau = T-n+1 .. T-1).
+        // Together with the in-loop updates every state-action is updated exactly once.
+        for (int tau = Math.max(0, STEP_LIMIT - N_STEP + 1); tau <= STEP_LIMIT - 1; tau++) {
+            double g = 0;
+            for (int k = STEP_LIMIT - 1 - tau; k >= 0; k--) g = rBuf[tau + k] + GAMMA * g;
+            ann.updateToward(sBuf[tau], aBuf[tau], g, ALPHA);
+            lastEpisodeUpdates++;
         }
 
         return new double[]{episodeReward, bugsFound, episodeBaseReward};
@@ -478,7 +623,6 @@ public class SarsaRestTester {
      * object. That is consistent for the rest of the run.
      */
     private void resetServerState() {
-        sampleChainDepth();
         for (Endpoint e : Endpoint.values()) {
             send("DELETE", e.name().toLowerCase(), null);
         }
@@ -494,8 +638,10 @@ public class SarsaRestTester {
      * to the system under test and no privileged access - it reads a response any
      * client could have.
      *
-     * Sampled at window boundaries only, so a chain armed and destroyed inside a window
-     * is missed. It is therefore a lower bound on arming.
+     * Sampled uniformly, CHAIN_SAMPLES_PER_RUN times per run, so windowsD1Armed /
+     * chainSamples estimates the FRACTION OF THE RUN the chain was armed - a continuous
+     * endpoint, where "was it ever armed" was a rare 0/1 event with no statistical power.
+     * Still a lower bound: a chain armed and destroyed between two samples is missed.
      */
     private void sampleChainDepth() {
         HttpResult r = send("GET", "points", null);
@@ -687,13 +833,21 @@ public class SarsaRestTester {
                 totalNovelPaths, Math.max(1, serverResets));
         System.out.printf("  exploration reward  : %.1f paid over %,d first visits (cap %.1f)%n",
                 totalExploreReward, shapesPaid, ADDRESSABLE_SHAPES * EXPLORE_BONUS);
-        System.out.printf("  server resets       : %,d (every %,d episodes)%n",
-                serverResets, LOG_EVERY);
+        System.out.printf("  shaping health      : max dialsSinceExecute %,d (inversion threshold %.0f); "
+                        + "%,d steps past it%n",
+                maxDialsSinceExecute, GAMMA / (1 - GAMMA), shapingInvertedSteps);
+        System.out.printf("  n-step SARSA        : n=%d (1 = one-step)  BETA=%.4f  ARM_BONUS=%.3f%n",
+                N_STEP, BETA, ARM_BONUS);
+        System.out.printf("  server resets       : %,d (every %,d episodes); novelty window %,d%n",
+                serverResets, RESET_EVERY > 0 ? RESET_EVERY : LOG_EVERY, LOG_EVERY);
         System.out.printf("  chain armed at window boundaries (sampled, lower bound):%n");
         System.out.printf("    D1-armed points: max %d, seen in %d/%d samples%n",
                 maxD1Armed, windowsD1Armed, chainSamples);
         System.out.printf("    D2-armed points: max %d, seen in %d/%d samples%n",
                 maxD2Armed, windowsD2Armed, chainSamples);
+        System.out.printf("    ARMED RATE (primary endpoint): D1 %.1f%%  D2 %.1f%%  over %,d uniform samples%n",
+                100.0 * windowsD1Armed / Math.max(1, chainSamples),
+                100.0 * windowsD2Armed / Math.max(1, chainSamples), chainSamples);
         System.out.printf("  hit rate            : %.2f%% of requests returned 500%n",
                 100.0 * totalBugFires / Math.max(1, totalExecutes));
 
@@ -745,7 +899,11 @@ public class SarsaRestTester {
         }
         for (PlantedDefect d : PLANTED) {
             Discovery hit = firstSeen.get(d.signature());
-            System.out.printf("    %s%n      chain: %s%n      blind baseline: 1 in %.2e episodes -> %s%n",
+            // Labelled, not bare: this block lists planted signatures whether or not they
+            // were found, so an unlabelled string here is indistinguishable from a
+            // discovery row to anything parsing the summary. That misread has happened.
+            System.out.printf("    expects-signature: %s%n      chain: %s%n"
+                            + "      blind baseline: 1 in %.2e episodes -> %s%n",
                     d.signature(), d.chain(), d.blindEpisodes(),
                     hit == null
                             ? String.format("not found in %,d episodes", episodesRun)
@@ -802,6 +960,15 @@ public class SarsaRestTester {
     record HttpResult(int status, String body) {}
 
     private HttpResult send(String method, String path, String json) {
+        if (IN_PROCESS) {
+            if (inProcess == null) inProcess = new InProcessApi();
+            try {
+                return inProcess.call(method, path, json);
+            } catch (Exception e) {
+                transportFailureCount++;
+                return null;
+            }
+        }
         try {
             HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(BASE_URL + path))
                     .timeout(Duration.ofSeconds(10))
@@ -848,6 +1015,14 @@ public class SarsaRestTester {
 
         if (httpType == HttpType.POST && r != null && r.status() == 201) {
             setIdFor(endpoint, extractId(r.body()));
+        }
+        // The arming step. Note the field dial still has to be right - with
+        // Field.PRICE the generator emits a POSITIVE discount - so this rewards the
+        // action tuple, not a guaranteed negative value.
+        if (ARM_BONUS != 0 && httpType == HttpType.PATCH && endpoint == Endpoint.DISCOUNTS
+                && s.getStrategy() == Strategy.NEGATIVE
+                && r != null && r.status() >= 200 && r.status() < 300) {
+            armActionDone = true;
         }
         return r;
     }

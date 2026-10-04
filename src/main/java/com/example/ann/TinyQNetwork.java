@@ -215,11 +215,20 @@ public class TinyQNetwork {
                               double[] sNext, int aNext,
                               boolean terminal,
                               double alpha, double gamma) {
-        double qSA = predict(s, a);
         double qNext = terminal ? 0.0 : predict(sNext, aNext);
-        double target = r + gamma * qNext;
-        double error = target - qSA;
+        return updateToward(s, a, r + gamma * qNext, alpha);
+    }
 
+    /**
+     * Semi-gradient step toward an externally computed target.
+     *
+     * The one-step SARSA target is just the n = 1 case, so sarsaUpdate delegates here
+     * and both paths share the single gradient implementation that
+     * annGradientMatchesFiniteDifference verifies. n-step SARSA computes its own
+     * n-step return and calls this directly.
+     */
+    public double updateToward(double[] s, int a, double target, double alpha) {
+        double error = target - predict(s, a);
         applySemiGradient(s, a, error, alpha);
         return error;
     }

@@ -49,6 +49,9 @@ public class SarsaSelfCheck {
         errorKindSeparatesGuardFromCrash();
         shapingIsPolicyInvariant();
         timeFeatureAdvancesWithinAStep();
+        nStepUpdatesEveryStepExactlyOnce();
+        nStepOneEqualsOneStepSarsa();
+        nStepReturnIsDiscountedByDistance();
         repeatedRunsAreIndependent();
 
         System.out.println("=".repeat(64));
@@ -384,20 +387,18 @@ public class SarsaSelfCheck {
         for (double eps : new double[]{0.01, 0.25, 1.00}) {
             SarsaRestTester t = new SarsaRestTester();
             t.pbt = new PayloadGenerator(1234);
-            RewardSpy spy = new RewardSpy(State.FEATURE_COUNT, 16, 32, 1234L);
-            t.ann = spy;
+            t.ann = new TinyQNetwork(State.FEATURE_COUNT, 16, 32, 1234L);
             t.EPSILON = eps;
             t.resetRunState();
             Random rng = new Random(3);
             for (int e = 0; e < 25; e++) {
                 int seenBefore = t.seenPaths.size();
-                int from = spy.rewards.size();
                 double[] res = t.executeEpisode(rng);
                 boolean cleanEpisode = res[2] == 0.0 && t.seenPaths.size() == seenBefore;
                 if (!cleanEpisode) continue;
                 double disc = 0;
-                for (int i = from; i < spy.rewards.size(); i++) {
-                    disc += Math.pow(SarsaRestTester.GAMMA, i - from) * spy.rewards.get(i);
+                for (int i = 0; i < t.lastEpisodeRewards.size(); i++) {
+                    disc += Math.pow(SarsaRestTester.GAMMA, i) * t.lastEpisodeRewards.get(i);
                 }
                 worst = Math.max(worst, Math.abs(disc));
                 tested++;
@@ -411,24 +412,85 @@ public class SarsaSelfCheck {
     private static void timeFeatureAdvancesWithinAStep() {
         SarsaRestTester t = new SarsaRestTester();
         t.pbt = new PayloadGenerator(1234);
-        PairSpy spy = new PairSpy(State.FEATURE_COUNT, 16, 32, 1234L);
-        t.ann = spy;
+        t.ann = new TinyQNetwork(State.FEATURE_COUNT, 16, 32, 1234L);
         t.EPSILON = 1.0;
         t.resetRunState();
         t.executeEpisode(new Random(11));
 
-        int idx = State.FEATURE_COUNT - 1;
         boolean advances = true, differs = false;
-        for (double[] p : spy.pairs) {
+        for (double[] p : t.lastEpisodeTimePairs) {
             if (p[0] <= p[1]) advances = false;          // remaining budget must decrease
             if (p[0] != p[1]) differs = true;
         }
         check("Time feature strictly decreases from s to s'", advances && differs,
-                "pairs=" + spy.pairs.size());
+                "pairs=" + t.lastEpisodeTimePairs.size());
 
-        boolean lastIsZero = !spy.pairs.isEmpty()
-                && spy.pairs.get(spy.pairs.size() - 1)[1] == 0.0;
+        boolean lastIsZero = !t.lastEpisodeTimePairs.isEmpty()
+                && t.lastEpisodeTimePairs.get(t.lastEpisodeTimePairs.size() - 1)[1] == 0.0;
         check("Time feature is 0 in the terminal s'", lastIsZero, "");
+    }
+
+    /**
+     * Three classic n-step bugs, all of which would pass a smoke test:
+     * dropping the tail flush, double-updating the overlap, and getting the
+     * discounting or the bootstrap term wrong.
+     */
+    private static void nStepUpdatesEveryStepExactlyOnce() {
+        // Swept over STEP_LIMIT because the tail flush bounds are written in terms of it,
+        // and the long-episode arms run 70 and 140. A flush that is correct at 35 can
+        // still drop or duplicate updates at another length.
+        boolean ok = true;
+        StringBuilder detail = new StringBuilder();
+        for (int steps : new int[]{3, 35, 70, 140, 280, 560, 750, 1120}) {
+            SarsaRestTester t = new SarsaRestTester();
+            t.pbt = new PayloadGenerator(1234);
+            t.ann = new TinyQNetwork(State.FEATURE_COUNT, 16, 32, 1234L);
+            t.EPSILON = 1.0;
+            t.STEP_LIMIT = steps;
+            t.resetRunState();
+            t.executeEpisode(new Random(5));
+            if (t.lastEpisodeUpdates != steps) ok = false;
+            detail.append(steps).append(":").append(t.lastEpisodeUpdates).append(' ');
+        }
+        check("n-step updates every state-action exactly once, at every STEP_LIMIT",
+                ok, "steps:updates = " + detail + "(n=" + SarsaRestTester.N_STEP + ")");
+    }
+
+    /** n = 1 must be numerically identical to the one-step SARSA update. */
+    private static void nStepOneEqualsOneStepSarsa() {
+        double[] s0 = new double[State.FEATURE_COUNT];
+        double[] s1 = new double[State.FEATURE_COUNT];
+        for (int i = 0; i < s0.length; i++) { s0[i] = 0.1 * i; s1[i] = 0.05 * i + 0.2; }
+        double r = 0.7, gamma = SarsaRestTester.GAMMA, alpha = 0.05;
+
+        TinyQNetwork a = new TinyQNetwork(State.FEATURE_COUNT, 16, 32, 99L);
+        TinyQNetwork b = new TinyQNetwork(State.FEATURE_COUNT, 16, 32, 99L);
+        a.sarsaUpdate(s0, 3, r, s1, 7, false, alpha, gamma);
+        // the n = 1 return: G = R + gamma^1 * Q(S', A')
+        b.updateToward(s0, 3, r + gamma * b.predict(s1, 7), alpha);
+        check("n=1 n-step return == one-step SARSA target",
+                Math.abs(a.predict(s0, 3) - b.predict(s0, 3)) < 1e-12,
+                "a=" + a.predict(s0, 3) + " b=" + b.predict(s0, 3));
+
+        TinyQNetwork c = new TinyQNetwork(State.FEATURE_COUNT, 16, 32, 99L);
+        TinyQNetwork d = new TinyQNetwork(State.FEATURE_COUNT, 16, 32, 99L);
+        c.sarsaUpdate(s0, 3, r, s1, 7, true, alpha, gamma);
+        d.updateToward(s0, 3, r, alpha);
+        check("terminal n=1 target drops the bootstrap",
+                Math.abs(c.predict(s0, 3) - d.predict(s0, 3)) < 1e-12, "");
+    }
+
+    /** The n-step return must be gamma-discounted by distance, not flat. */
+    private static void nStepReturnIsDiscountedByDistance() {
+        double g1 = 0, g2 = 0;
+        double[] rewards = {0.0, 0.0, 0.0, 1.0};   // reward arrives 4 steps out
+        double gamma = SarsaRestTester.GAMMA;
+        for (int k = rewards.length - 1; k >= 0; k--) g1 = rewards[k] + gamma * g1;
+        g2 = Math.pow(gamma, 3);                    // closed form: gamma^3 * 1.0
+        check("n-step return discounts by distance (Horner == closed form)",
+                Math.abs(g1 - g2) < 1e-12, "horner=" + g1 + " closed=" + g2);
+        check("distant credit is attenuated, not equal",
+                g1 < 1.0 && g1 > 0.9, "g=" + g1);
     }
 
     private static void repeatedRunsAreIndependent() {
@@ -455,29 +517,6 @@ public class SarsaSelfCheck {
 
     private static State freshState() {
         return new State(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0);
-    }
-
-    /** Records every reward handed to the learner. */
-    private static class RewardSpy extends TinyQNetwork {
-        final java.util.List<Double> rewards = new java.util.ArrayList<>();
-        RewardSpy(int d, int h, int a, long s) { super(d, h, a, s); }
-        @Override public double sarsaUpdate(double[] s, int a, double r, double[] sn,
-                                            int an, boolean term, double al, double g) {
-            rewards.add(r);
-            return super.sarsaUpdate(s, a, r, sn, an, term, al, g);
-        }
-    }
-
-    /** Records the time feature of (s, s') for every transition. */
-    private static class PairSpy extends TinyQNetwork {
-        final java.util.List<double[]> pairs = new java.util.ArrayList<>();
-        PairSpy(int d, int h, int a, long s) { super(d, h, a, s); }
-        @Override public double sarsaUpdate(double[] s, int a, double r, double[] sn,
-                                            int an, boolean term, double al, double g) {
-            int i = s.length - 1;
-            pairs.add(new double[]{s[i], sn[i]});
-            return super.sarsaUpdate(s, a, r, sn, an, term, al, g);
-        }
     }
 
     private static double[][] arr2(Object o, String name) throws Exception {
