@@ -1,4 +1,45 @@
-# RL vs. RESTler — experiment design, fairness audit, and protocol
+# SARSA vs. RESTler — experiment details
+
+The [README](../README.md) is the short version. This document keeps the implementation
+notes and the reasoning behind the comparison, including predictions that changed as
+the results came in.
+
+## Results summary
+
+| | SARSA | Best RESTler-port configuration | Random |
+|---|---:|---:|---:|
+| Defect 1 | 55/55 — 100% | 14/25 — 56.0% | 48/55 — 87.3% |
+| Defect 2 | 45/55 — 81.8% | 10/25 — 40.0% | 5/55 — 9.1% |
+| Requests per run | 295,657 | 250,000 cap | 295,657 |
+| Median requests to first detection of a signature | 475 | 2,525 | 671 |
+| p90 requests to first detection of a signature | 4,816 | 24,727 | 5,208 |
+
+The latency figures cover error signatures generally, not just the hidden defects.
+All three testers reached the 18-signature catalogue across the experiments. SARSA
+was more reliable on both hidden defects and needed fewer requests to first detect
+signatures. Its total request budget was about 18% larger than RESTler's cap.
+
+The reported sweep covered 16 RESTler configurations. Only the random-walk setup with
+an explicitly ordered dictionary found either hidden defect. The configuration using
+the agent's vocabulary with neutral dictionary ordering found neither in 25 runs.
+Trace analysis identified prefix selection and extensive prefix replay as important
+differences from the SARSA runner's use of existing server state.
+
+### Reading this notebook
+
+The sections below are the development record, rather than one final specification.
+Early plans mention nine configurations, different trial counts and equal 250,000-request
+budgets; later experiments expanded the comparison. The table above is the final result
+summarised in the README. Where an addendum corrects an earlier prediction or protocol,
+read it as the later finding.
+
+- [Search and dictionary behavior](#part-1--restler-from-source).
+- [Port implementation and deviations](#part-4--fidelity-table-and-deviations-register).
+- [Problems found while building the harness](#part-5--audit-addenda-found-during-implementation).
+- [The successful random-walk configuration](#512-restler-finds-defect-1--and-which-mode-does-it-is-the-result).
+- [Run a trial](#run-a-trial).
+
+## Original experiment plan
 
 **Branch:** `2-hidden-bugs-restler`
 **Question:** on one fixed API with two planted stateful defects, does a learned
@@ -814,3 +855,41 @@ The two testers now look like two points on one axis rather than a winner and a 
 | RESTler `bfs-fast` | first-by-grammar-position | dictionary | no — never extends the poisoned prefix |
 | RESTler `random-walk` | uniform random | dictionary | **yes**, unreliably |
 | SARSA | learned, conditioned on id-state | learned per request | yes, reliably |
+
+## Run a trial
+
+Requires JDK 17+ and Maven. Start a dedicated API instance:
+
+```bash
+mvn spring-boot:run -Dspring-boot.run.arguments="--server.port=8086"
+```
+
+In another terminal, run a RESTler-port trial. This example uses random-walk search,
+the per-endpoint negative-first dictionary and both implemented checkers:
+
+```bash
+mvn -q compile exec:java \
+  -Dexec.mainClass=com.example.harness.TrialRunner \
+  -Dsarsa.baseUrl=http://localhost:8086/api/ \
+  -Dexec.args="arm=restler seed=2001 budget=250000 reset=50000 mode=random-walk dict=matched-negfirst-pe checkers=all"
+```
+
+For a SARSA trial through the same harness, restart the API and use:
+
+```bash
+mvn -q compile exec:java \
+  -Dexec.mainClass=com.example.harness.TrialRunner \
+  -Dsarsa.baseUrl=http://localhost:8086/api/ \
+  -Dexec.args="arm=sarsa seed=2001 budget=250000 reset=50000 steps=1120 eps=0.3 neurons=16"
+```
+
+Use `arm=random` for the random policy. These examples show how to run individual
+trials at a common request cap; they are not a script reproducing the full results
+table. Start a fresh API process for each independent trial. The final `RESULT` line
+records discovery request indices, coverage, request counts and runtime.
+
+The port's checks run without a live API:
+
+```bash
+mvn -q compile exec:java -Dexec.mainClass=com.example.restler.RestlerSelfCheck
+```

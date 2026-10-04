@@ -1,19 +1,29 @@
-# Earlier results — difficulty estimates, hyperparameter sweeps, and the reward history
+# Earlier results — the development notebook
 
-Moved out of the README when this branch narrowed to the RESTler comparison. Nothing here
-is retracted unless it says so; it is the record of how the agent and its reward got to the
-configuration the README now reports, and of two conclusions that an undersized sample
-manufactured and a larger one withdrew.
+This is the history behind the agent. For the final RESTler comparison, start with
+the [README](../README.md) or the [results summary](RESTLER-EXPERIMENT.md#results-summary).
 
-Two things in here are **superseded** by the current README and are kept for provenance:
+## What came out of these experiments
 
-- the episode-denominated headline (50,000 episodes at `STEP_LIMIT = 35`) — the README now
-  reports a request-denominated budget at 1,120 steps, which is the only basis on which a
-  tool with no notion of an episode can be compared;
-- *"Defect 2 looks structurally limited, so the next lever is the state representation —
-  not a knob"* — correct about every **learner** hyperparameter swept, and wrong as a
-  general claim: episode length is a knob, it was never swept, and it moved Defect 2 from
-  13% to 82%. See "What actually unlocked Defect 2" in the README.
+- **The first version could be worse than random.** At low exploration, some runs
+  repeated a narrow set of requests and covered only 22 of 1,068 request shapes.
+- **Reward accounting mattered.** A trivial 500 originally shared its novelty reward
+  with both hidden defects. Separating error outcomes corrected that collision.
+- **More requests did not automatically mean better testing.** Network width and
+  learning rate changed request cost without a comparable improvement in D2 discovery.
+- **Small samples changed the story.** A 33.3% D2 rate at 18 runs became 17.8% at
+  45 runs, overturning earlier interpretations of the parameter sweeps.
+- **The biggest improvement came later.** Longer episodes raised D2 discovery from
+  about 13% to 76–82% at the same total action budget. That superseded the working
+  hypothesis below that extra state features were the necessary next step.
+
+The original tables and explanations follow as a historical record. References to
+"current code" or a "headline" describe the version being tested at that point,
+not the final comparison. In particular, the old 35-step runs and single-episode
+difficulty estimates should not be mixed with the later request-budget results.
+
+Useful starting points: [parameter sweeps](#hyperparameter-sweeps--capacity-exploration-rate-learning-rate),
+[revised conclusions](#what-was-retracted), and [reward changes](#how-the-reward-got-here).
 
 ---
 
@@ -99,7 +109,7 @@ and the real system agree closely — but the right-hand column is the evidence.
 > runs — the reset *helps* random search, because clearing the store means `GET_ALL`
 > returns a freshly created object each window instead of the same never-poisoned
 > object #1 for the whole run. The current-code figure is the one every arm in
-> [Results](#results) is measured against; this section is kept because it is what the
+> [random-search comparison](#against-random-search) is measured against; this section is kept because it is what the
 > single-episode model was validated on.
 
 ### One mechanic worth knowing before interpreting any run
@@ -222,7 +232,7 @@ without new trials.
 ### Headline: full 50,000-episode run
 
 `EPISODES = 50,000`, `GAMMA = 0.99`, `ALPHA = 0.01`, 16 hidden units (see
-[capacity](#network-capacity-16-vs-32-hidden-units)), server reset
+[capacity](#hyperparameter-sweeps--capacity-exploration-rate-learning-rate)), server reset
 every 10k, **n = 18 per arm** on paired seeds 1001–1018.
 
 | `ε` | n | Defect 1 | D1 median episode | Defect 2 | Requests/trial | Shapes /1068 | Bug paths |
@@ -448,9 +458,7 @@ is vacuous, and the shaping term alone decides what gets learned.
 
 Three fixes followed: `errorKind` in the bug path key, the first-visit
 `EXPLORE_BONUS`, and the windowed server reset (all described under
-[Reward](#reward)). They did what they were designed to do — worst-case shape coverage
+[the reward history](#how-the-reward-got-here)). They did what they were designed to do — worst-case shape coverage
 went from **22 → 355** at `ε=0.01`, and `ε=0.3` now reaches 1,068 of 1,068 — but they
 did **not** make `ε=0.01` competitive. Exploration rate turned out to be load-bearing,
 which is what motivated the sweep above.
-
-
